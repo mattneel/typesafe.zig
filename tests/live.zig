@@ -266,23 +266,3 @@ test "a long-running client reloads its TLS trust and keeps reusing connections"
     var fresh = try client.listModels(.{});
     fresh.deinit();
 }
-
-test "extra wire fields reach the API" {
-    var client = try liveClient(.{});
-    defer client.deinit();
-
-    const questions = .{
-        .greeting = typesafe.withExtra(typesafe.noul("Is this a greeting?", .{}), .{ .unrecognized_field_from_typesafe_zig = true }),
-    };
-    var diagnostics: typesafe.Diagnostics = .init(testing.allocator);
-    defer diagnostics.deinit();
-    // The API either ignores the unknown field or rejects it with a validation
-    // error naming it; both prove the field was sent.
-    if (client.ask("hello there", questions, .{ .diagnostics = &diagnostics })) |result| {
-        defer result.deinit();
-        try expectProbability(result.answers.greeting.noul);
-    } else |err| {
-        try testing.expect(err == error.Unprocessable or err == error.BadRequest);
-        try testing.expect(std.mem.find(u8, diagnostics.body.?, "unrecognized_field_from_typesafe_zig") != null);
-    }
-}

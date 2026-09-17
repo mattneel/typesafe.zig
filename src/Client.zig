@@ -55,7 +55,7 @@ io: Io,
 ///
 /// Do not configure an HTTPS proxy: `std.http.Client` in Zig 0.16 does not
 /// run TLS inside a proxy tunnel, so the API key would travel in plaintext.
-/// Calls fail with `error.InvalidRequest` while `https_proxy` is set.
+/// Calls fail with `error.InvalidOption` while `https_proxy` is set.
 http: std.http.Client,
 /// The API base URL, without a trailing slash.
 base_url: []const u8,
@@ -587,7 +587,7 @@ fn classify(err: anyerror) Error {
         error.TlsInitializationFailed, error.CertificateBundleLoadFailure => error.TlsFailure,
         error.HttpContentEncodingUnsupported => error.InvalidResponse,
         // A proxy was configured after the call's own check; not transient.
-        error.TlsProxyUnsupported => error.InvalidRequest,
+        error.TlsProxyUnsupported => error.InvalidOption,
         else => if (std.mem.startsWith(u8, @errorName(err), "Tls") or
             std.mem.startsWith(u8, @errorName(err), "Certificate"))
             error.TlsFailure
@@ -710,7 +710,7 @@ const Call = struct {
         return call;
     }
 
-    fn validate(call: *Call, spec: Spec) error{InvalidRequest}!void {
+    fn validate(call: *Call, spec: Spec) error{InvalidOption}!void {
         const client = call.client;
         const diagnostics = call.diagnostics;
         if (spec.model) |model| {
@@ -733,7 +733,7 @@ const Call = struct {
                         header.name,
                     });
                 }
-                return error.InvalidRequest;
+                return error.InvalidOption;
             };
         }
         // std.http.Client in Zig 0.16 does not run TLS inside a proxy tunnel:
@@ -1130,6 +1130,7 @@ const Call = struct {
     /// certificates issued after it started and accept ones that have since
     /// expired, so the time and roots are refreshed hourly.
     fn refreshTrust(client: *Client) Io.Cancelable!void {
+        if (!tls_trust_refresh) return;
         if (std.http.Client.disable_tls) return;
         const http = &client.http;
         const io = client.io;
@@ -1260,13 +1261,13 @@ const Call = struct {
     }
 };
 
-fn invalidOption(diagnostics: ?*Diagnostics, path: []const u8, message: []const u8) error{InvalidRequest} {
+fn invalidOption(diagnostics: ?*Diagnostics, path: []const u8, message: []const u8) error{InvalidOption} {
     if (diagnostics) |d| {
-        d.err = error.InvalidRequest;
+        d.err = error.InvalidOption;
         d.setString("path", path);
         d.setString("message", message);
     }
-    return error.InvalidRequest;
+    return error.InvalidOption;
 }
 
 /// Decompresses a response body. `std.http.Client` offers `gzip` and
@@ -1300,6 +1301,18 @@ pub const max_timeout: Io.Duration = .fromSeconds(365 * std.time.s_per_day);
 /// How often a long-running client reloads the clock and root certificates
 /// it checks TLS certificates against.
 const trust_refresh_interval: Io.Duration = .fromSeconds(std.time.s_per_hour);
+
+/// Whether a long-running client reloads the system root certificates and its
+/// clock hourly. On by default. Turn it off with `-Dtls-trust-refresh=false`
+/// on the command line, or by passing `.tls_trust_refresh = false` to
+/// `b.dependency("typesafe", ...)`.
+///
+/// The refresh is the only place this package reads `std.http.Client` fields
+/// that std does not promise to keep (`ca_bundle`, `ca_bundle_lock`, `now`).
+/// Turning it off keeps the whole package on std's supported surface; the cost
+/// is that a client running for longer than a certificate's validity window
+/// verifies against the time and roots it loaded at its first HTTPS request.
+pub const tls_trust_refresh: bool = build_options.tls_trust_refresh;
 
 fn resolveTimeout(timeout: Io.Duration) error{InvalidTimeout}!?Io.Duration {
     if (timeout.nanoseconds == Io.Duration.max.nanoseconds) return null;
@@ -1422,6 +1435,7 @@ test "identification strings" {
 }
 
 test "the TLS trust refresh only runs when the loaded time is stale" {
+    if (!tls_trust_refresh) return; // the build turned it off
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     var client: Client = try .init(gpa, io, .{ .api_key = "k" });

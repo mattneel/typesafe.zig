@@ -48,8 +48,9 @@ message: ?[]const u8 = null,
 /// The raw response body of an error response or an undecodable 2xx
 /// response, capped at `max_body_bytes`.
 body: ?[]const u8 = null,
-/// For `InvalidRequest` and `InvalidResponse`: the path to the offending
-/// value, such as `questions.department.criteria` or `answers.tone.confidence`.
+/// For `InvalidRequest`, `InvalidOption` and `InvalidResponse`: the path to
+/// the offending value or option, such as `questions.department.criteria`,
+/// `timeout` or `answers.tone.confidence`.
 path: ?[]const u8 = null,
 /// The server's requested wait, from the `retry-after-ms` or `Retry-After`
 /// header of the final response.
@@ -161,6 +162,7 @@ fn defaultMessage(err: ?errors.Error) []const u8 {
     const e = err orelse return "request succeeded";
     return switch (e) {
         error.InvalidRequest => "invalid request",
+        error.InvalidOption => "invalid option",
         error.InvalidResponse => "invalid response",
         error.Timeout => "request timed out",
         error.ConnectionFailed => "connection failed",

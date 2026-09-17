@@ -118,7 +118,6 @@ fn writeQuestion(gpa: Allocator, enc: *json.Encoder, q: Question) json.Encoder.E
             try enc.endArray();
         },
     }
-    try writeExtra(gpa, enc, q.extra);
     try enc.endObject();
 }
 
@@ -129,26 +128,6 @@ fn writeEntry(enc: *json.Encoder, name: []const u8, value: Json) json.Encoder.Er
     switch (value.kind()) {
         .null, .string, .array, .object => try enc.write(value),
         else => |kind| return enc.fail("expected a string, object, array or null, got {t}", .{kind}),
-    }
-}
-
-fn writeExtra(gpa: Allocator, enc: *json.Encoder, extra: []const Question.Field) json.Encoder.Error!void {
-    if (extra.len == 0) return;
-    var seen: std.StringHashMapUnmanaged(void) = .empty;
-    defer seen.deinit(gpa);
-    try seen.ensureTotalCapacity(gpa, @intCast(extra.len));
-    for (extra) |field| {
-        if (field.name.len == 0) return enc.fail("an extra field has an empty name", .{});
-        for ([_][]const u8{ "type", "instructions", "criteria" }) |reserved| {
-            if (std.mem.eql(u8, field.name, reserved)) {
-                return enc.fail("extra field \"{s}\" would overwrite the question's own member", .{field.name});
-            }
-        }
-        if (seen.getOrPutAssumeCapacity(field.name).found_existing) {
-            return enc.fail("duplicate extra field \"{s}\"", .{field.name});
-        }
-        try enc.objectField(field.name);
-        try enc.write(field.value);
     }
 }
 
@@ -309,14 +288,13 @@ test "encodeRequest writes structured JSON entries and extra fields" {
                 .{ .raw = "{\"level\":\"low\"}" },
                 .{ .string = "high" },
             } } } },
-            .extra = &.{.{ .name = "future_field", .value = .{ .raw = "true" } }},
         },
     };
     var failure: json.Failure = .{};
     const body = try encodeRequest(gpa, .{ .message = "hi" }, "jev-latest", &questions, &failure);
     defer gpa.free(body);
     try std.testing.expectEqualStrings(
-        \\{"state":{"message":"hi"},"model":"jev-latest","questions":{"requests_credentials":{"type":"noul","instructions":{"question":"Does the `message` ask for a credential?"},"criteria":{"true":"Asks for a password","false":null}},"severity":{"type":"score","instructions":null,"criteria":[{"level":"low"},"high"],"future_field":true}}}
+        \\{"state":{"message":"hi"},"model":"jev-latest","questions":{"requests_credentials":{"type":"noul","instructions":{"question":"Does the `message` ask for a credential?"},"criteria":{"true":"Asks for a password","false":null}},"severity":{"type":"score","instructions":null,"criteria":[{"level":"low"},"high"]}}}
     , body);
 }
 
@@ -343,7 +321,6 @@ test "encodeRequest validates questions" {
     try expectInvalid(&.{.{ .id = "n", .spec = .{ .noul = .{ .yes = .null, .no = .{ .string = "" } } } }}, "questions.n", "a noul question needs instructions or criteria");
     try expectInvalid(&.{.{ .id = "n", .spec = .{ .noul = .{ .instructions = .{ .raw = "42" } } } }}, "questions.n.instructions", "expected a string, object, array or null, got number");
     try expectInvalid(&.{.score("s", "x", .{ .json = &.{ .{ .string = "a" }, .{ .raw = "{" } } })}, "questions.s.criteria[1]", "raw JSON is not a single valid JSON value");
-    try expectInvalid(&.{.{ .id = "n", .spec = .{ .noul = .{ .instructions = .{ .string = "x" } } }, .extra = &.{.{ .name = "criteria", .value = .null }} }}, "questions.n", "extra field \"criteria\" would overwrite the question's own member");
 }
 
 test "decodeResponse decodes answers in question order" {

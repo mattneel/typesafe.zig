@@ -403,7 +403,7 @@ test "a response larger than max_response_bytes is rejected" {
     try testing.expectEqual(0, models.models.len);
 }
 
-test "invalid requests fail before anything is sent" {
+test "invalid data and invalid options fail before anything is sent" {
     const h = try Harness.init(.{});
     defer h.deinit();
     var diagnostics: Diagnostics = .init(testing.allocator);
@@ -415,13 +415,14 @@ test "invalid requests fail before anything is sent" {
     try testing.expectEqualStrings("string is not valid UTF-8", diagnostics.message.?);
     try testing.expectEqual(0, diagnostics.attempts);
 
-    try testing.expectError(error.InvalidRequest, h.client.ask(state, questions, .{
+    try testing.expectError(error.InvalidOption, h.client.ask(state, questions, .{
         .extra_headers = &.{.{ .name = "Authorization", .value = "Bearer stolen" }},
         .diagnostics = &diagnostics,
     }));
+    try testing.expectEqualStrings("extra_headers", diagnostics.path.?);
     try testing.expectEqualStrings("cannot override reserved header \"Authorization\"", diagnostics.message.?);
 
-    try testing.expectError(error.InvalidRequest, h.client.ask(state, questions, .{ .model = "", .diagnostics = &diagnostics }));
+    try testing.expectError(error.InvalidOption, h.client.ask(state, questions, .{ .model = "", .diagnostics = &diagnostics }));
     try testing.expectEqualStrings("model", diagnostics.path.?);
 
     try testing.expectEqual(0, h.server.requestCount());
@@ -710,10 +711,10 @@ test "hooks see calls rejected for invalid options" {
     const h = try Harness.init(.{ .hooks = .{ .context = &counter, .onRequestStart = Counter.onStart, .onRequestEnd = Counter.onEnd } });
     defer h.deinit();
 
-    try testing.expectError(error.InvalidRequest, h.client.ask(state, questions, .{ .model = "" }));
+    try testing.expectError(error.InvalidOption, h.client.ask(state, questions, .{ .model = "" }));
     try testing.expectEqual(1, counter.starts);
     try testing.expectEqual(1, counter.ends);
-    try testing.expectEqual(error.InvalidRequest, counter.last_err.?);
+    try testing.expectEqual(error.InvalidOption, counter.last_err.?);
 }
 
 test "timeouts: Io.Duration.max disables, anything above max_timeout is rejected" {
@@ -729,7 +730,7 @@ test "timeouts: Io.Duration.max disables, anything above max_timeout is rejected
     defer h.deinit();
     var diagnostics: Diagnostics = .init(gpa);
     defer diagnostics.deinit();
-    try testing.expectError(error.InvalidRequest, h.client.listModels(.{ .timeout = too_long, .diagnostics = &diagnostics }));
+    try testing.expectError(error.InvalidOption, h.client.listModels(.{ .timeout = too_long, .diagnostics = &diagnostics }));
     try testing.expectEqualStrings("timeout", diagnostics.path.?);
     try h.server.enqueue(.{ .body = "{\"models\":[]}" });
     var models = try h.client.listModels(.{ .timeout = .max });
@@ -762,24 +763,9 @@ test "an HTTPS base URL refuses to run through a proxy" {
 
     var diagnostics: Diagnostics = .init(gpa);
     defer diagnostics.deinit();
-    try testing.expectError(error.InvalidRequest, client.ask(state, questions, .{ .diagnostics = &diagnostics }));
+    try testing.expectError(error.InvalidOption, client.ask(state, questions, .{ .diagnostics = &diagnostics }));
     try testing.expect(std.mem.startsWith(u8, diagnostics.message.?, "HTTPS requests through a proxy are not supported"));
     try testing.expectEqual(0, diagnostics.attempts);
-}
-
-test "withExtra sends additional wire fields" {
-    const h = try Harness.init(.{});
-    defer h.deinit();
-    const extended = .{
-        .is_urgent = question.withExtra(question.noul("Does this convey urgency?", .{}), .{ .future_field = .{ .enabled = true } }),
-    };
-    try h.server.enqueueAnswers(extended, .{ .is_urgent = .{ .noul = 0.5 } }, .{});
-    var result = try h.client.ask(state, extended, .{});
-    defer result.deinit();
-    try testing.expectEqual(0.5, result.answers.is_urgent.noul);
-    try testing.expect(std.mem.endsWith(u8, h.server.request(0).body,
-        \\"questions":{"is_urgent":{"type":"noul","instructions":"Does this convey urgency?","future_field":{"enabled":true}}}}
-    ));
 }
 
 test "diagnostics after a retried error and an undecodable response hold only the final attempt" {

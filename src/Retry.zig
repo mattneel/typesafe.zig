@@ -90,6 +90,7 @@ pub fn isRetryable(policy: Retry, err: errors.Error) bool {
         error.Timeout,
         => policy.retry_transport_errors,
         error.InvalidRequest,
+        error.InvalidOption,
         error.BadRequest,
         error.Unauthorized,
         error.PermissionDenied,

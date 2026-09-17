@@ -290,21 +290,6 @@ test "questions: empty nouls and null levels found at run time are InvalidReques
     try testing.expectEqualStrings("score level 1 must not be null", failure.message());
 }
 
-test "questions: withExtra writes its fields after the question's own" {
-    const gpa = testing.allocator;
-    const Team = enum { billing, other };
-    const q = question.withExtra(choice(Team, "Team?", .{}), .{ .hint = "short", .weight = .{ .billing = 2 } });
-    try testing.expect(@TypeOf(q).Answer == question.ChoiceAnswer(Team));
-    const out = try std.json.Stringify.valueAlloc(gpa, q, .{});
-    defer gpa.free(out);
-    try testing.expectEqualStrings(
-        \\{"type":"choice","instructions":"Team?","criteria":{"billing":null,"other":null},"hint":"short","weight":{"billing":2}}
-    , out);
-
-    const s = question.withExtra(score("Rate", .{ "Low", "High" }), .{ .x = true });
-    try testing.expectEqualStrings("High", question.scoreLevels(s)[1]);
-}
-
 test "answers: margin is rounded to 10 decimal places" {
     const Pair = enum { a, b };
     const answer: question.ChoiceAnswer(Pair) = .{ .choice = .a, .probabilities = .{ .a = 0.3, .b = 0.2 }, .confidence = 0.1 };

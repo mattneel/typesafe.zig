@@ -106,20 +106,11 @@ pub const Question = struct {
     /// Non-empty and unique within a call. Not shown to the model.
     id: []const u8,
     spec: Spec,
-    /// Additional wire fields, for API features newer than this client.
-    /// Names must be unique and cannot be `type`, `instructions` or `criteria`.
-    extra: []const Field = &.{},
 
     pub const Spec = union(question.Kind) {
         noul: Noul,
         choice: Choice,
         score: Score,
-    };
-
-    /// A named JSON value.
-    pub const Field = struct {
-        name: []const u8,
-        value: Json,
     };
 
     /// A Noul question with text instructions and no criteria.

@@ -154,6 +154,14 @@ pub fn ScoreAnswer(comptime level_count: usize) type {
             probability: f64,
         };
 
+        /// Returns the probability of `level`, the way
+        /// `ChoiceAnswer.probability` takes an option. Indexing
+        /// `probabilities` directly does the same and checks the index the
+        /// same way.
+        pub fn probability(answer: Self, level: usize) f64 {
+            return answer.probabilities[level];
+        }
+
         /// Returns the score rounded to the nearest level, clamped to the
         /// valid range.
         pub fn expectedLevel(answer: Self) usize {
@@ -329,9 +337,11 @@ pub fn Score(comptime level_count: usize, comptime Instructions: type, comptime 
 
         /// Writes the question's members without the enclosing object.
         pub fn writeFields(question: @This(), w: anytype) !void {
-            // Each level's check and stored type are charged against the
-            // caller's comptime branch budget, so a Score with many levels
-            // needs the margin its own enumeration does not cover.
+            // A Score with many levels is the most comptime-expensive shape
+            // the constructors have: each level is checked, its stored type
+            // built and (for the answer encoder) its key formatted. The
+            // budget is charged to the caller's whole evaluation, so the
+            // margin has to cover all of them at once.
             @setEvalBranchQuota(eval_branch_quota_base + 512 * level_count);
             const checked = @TypeOf(w) == *json.Encoder;
             try w.objectField("type");
@@ -354,47 +364,6 @@ pub fn Score(comptime level_count: usize, comptime Instructions: type, comptime 
         /// encode it directly as well as through the client.
         pub fn jsonStringify(question: @This(), jws: *std.json.Stringify) std.json.Stringify.Error!void {
             return question.writeTypesafeJson(jws);
-        }
-    };
-}
-
-/// A question with additional wire fields. Build one with `withExtra`.
-pub fn WithExtra(comptime Question: type, comptime Extra: type) type {
-    comptime checkExtra(Question, Extra);
-
-    return struct {
-        question: Question,
-        extra: Extra,
-
-        /// The wire type of the question this one extends.
-        pub const kind: Kind = Question.kind;
-        /// The answer the API returns for this question.
-        pub const Answer = Question.Answer;
-        /// The question type this one extends.
-        pub const Base = Question;
-
-        /// Writes the question's members and then the extra fields, without
-        /// the enclosing object.
-        pub fn writeTypesafeJson(extended: @This(), w: anytype) !void {
-            try w.beginObject();
-            try extended.writeFields(w);
-            try w.endObject();
-        }
-
-        /// Writes the question's members, then the extra fields, without the
-        /// enclosing object.
-        pub fn writeFields(extended: @This(), w: anytype) !void {
-            try extended.question.writeFields(w);
-            inline for (@typeInfo(Extra).@"struct".fields) |field| {
-                try w.objectField(field.name);
-                try w.write(@field(extended.extra, field.name));
-            }
-        }
-
-        /// Writes the question and its extra fields, so `std.json.Stringify`
-        /// can encode it directly as well as through the client.
-        pub fn jsonStringify(extended: @This(), jws: *std.json.Stringify) std.json.Stringify.Error!void {
-            return extended.writeTypesafeJson(jws);
         }
     };
 }
@@ -475,40 +444,12 @@ pub fn score(
     };
 }
 
-/// Adds wire fields to a question, for API features newer than this client.
-///
-/// `extra` is a struct literal whose fields are written after the question's
-/// own members. The names `type`, `instructions` and `criteria` are compile
-/// errors, as is calling `withExtra` on a question that already has extras.
-///
-/// ```zig
-/// const q = typesafe.withExtra(typesafe.noul("Is this spam?", .{}), .{ .future_field = true });
-/// ```
-pub fn withExtra(question: anytype, extra: anytype) WithExtra(@TypeOf(question), StoredStruct(@TypeOf(extra))) {
-    return .{ .question = question, .extra = storeStruct(extra) };
-}
-
 /// Returns `true` when `T` is a question type: it declares `kind` and
-/// `Answer`, as the types built by `noul`, `choice`, `score` and `withExtra`
-/// do.
+/// `Answer`, as the types built by `noul`, `choice` and `score` do.
 pub fn isQuestion(comptime T: type) bool {
     return @typeInfo(T) == .@"struct" and
         @hasDecl(T, "kind") and @TypeOf(T.kind) == Kind and
         @hasDecl(T, "Answer") and @TypeOf(T.Answer) == type;
-}
-
-/// Returns the levels of a Score question, looking through `withExtra`.
-pub fn scoreLevels(question: anytype) @TypeOf(baseQuestion(question).levels) {
-    return baseQuestion(question).levels;
-}
-
-fn baseQuestion(question: anytype) BaseQuestion(@TypeOf(question)) {
-    if (@hasDecl(@TypeOf(question), "Base")) return baseQuestion(question.question);
-    return question;
-}
-
-fn BaseQuestion(comptime T: type) type {
-    return if (@hasDecl(T, "Base")) BaseQuestion(T.Base) else T;
 }
 
 /// The struct of typed answers for a questions struct: the same field names,
@@ -529,9 +470,13 @@ pub fn Answers(comptime Questions: type) type {
     return @Struct(.auto, null, &names, &types, &@splat(.{}));
 }
 
-/// The comptime branch budget helpers start from before adding a margin per
-/// field, so large enums and question sets compile without the caller raising
-/// `@setEvalBranchQuota`.
+/// The comptime branch budget the helpers start from, before adding a margin
+/// per field. Zig's default is 1000, and an entry check walks a type, so the
+/// margin is what keeps an ordinary question set from needing the caller to
+/// raise `@setEvalBranchQuota` themselves. The test at the end of this file
+/// compiles a 150-question batch and a 100-level Score, which is the scale the
+/// package claims; a much larger set can still reach the limit, and the
+/// compiler names the builtin that raises it.
 const eval_branch_quota_base = 1000;
 
 fn checkQuestions(comptime Questions: type) []const std.builtin.Type.StructField {
@@ -618,7 +563,6 @@ fn checkLevelCount(comptime level_count: usize) void {
 /// Rejects entry types the API never accepts: booleans and numbers. Strings,
 /// objects, arrays and null are fine.
 fn checkEntry(comptime T: type, comptime what: []const u8) void {
-    @setEvalBranchQuota(1 << 16);
     if (T == Stored(@TypeOf(null))) return;
     // An entry reaches the wire as the value inside its optionals and
     // single-item pointers, so `??bool`, `*bool` and `*u8` are as invalid as
@@ -659,26 +603,6 @@ fn checkLevel(comptime T: type) void {
         @compileError("typesafe: a score level must not be null");
     }
     checkEntry(T, "a score level");
-}
-
-fn checkExtra(comptime Question: type, comptime Extra: type) void {
-    if (!isQuestion(Question) or !std.meta.hasFn(Question, "writeFields")) {
-        @compileError("typesafe: withExtra needs a question built with typesafe.noul, typesafe.choice or typesafe.score, got " ++
-            @typeName(Question));
-    }
-    if (@hasDecl(Question, "Base")) {
-        @compileError("typesafe: the question already has extra fields; pass every extra field to one withExtra call");
-    }
-    const fields = literalFields(Extra) orelse {
-        @compileError("typesafe: extra fields must be a struct literal such as .{ .future_field = true }, got " ++ @typeName(Extra));
-    };
-    for (fields) |field| {
-        for ([_][]const u8{ "type", "instructions", "criteria" }) |reserved| {
-            if (std.mem.eql(u8, field.name, reserved)) {
-                @compileError("typesafe: extra field '" ++ field.name ++ "' would overwrite the question's own member");
-            }
-        }
-    }
 }
 
 fn levelCount(comptime Levels: type) usize {
@@ -987,6 +911,7 @@ test "score answer helpers" {
     };
     try std.testing.expectEqual(2, answer.expectedLevel());
     try std.testing.expectEqual(2, answer.maxLevel());
+    try std.testing.expectEqual(0.65, answer.probability(2));
     const order = answer.ranked();
     try std.testing.expectEqual(2, order[0].level);
     try std.testing.expectEqual(1, order[1].level);
@@ -997,4 +922,56 @@ test "score answer helpers" {
     try std.testing.expectEqual(0, low.maxLevel());
     const high: ScoreAnswer(3) = .{ .score = 7, .probabilities = .{ 0, 0, 1 }, .confidence = 1 };
     try std.testing.expectEqual(2, high.expectedLevel());
+}
+
+/// Distinct field names `q0`, `q1`, ... for a synthetic questions struct.
+/// Built by hand because `std.fmt.comptimePrint` is itself expensive enough at
+/// comptime to exhaust the budget this test exists to measure.
+fn numberedNames(comptime count: usize) [count][]const u8 {
+    const digits = "0123456789";
+    var buffers: [count][4]u8 = undefined;
+    var out: [count][]const u8 = undefined;
+    for (&out, &buffers, 0..) |*slot, *buffer, i| {
+        var value = i;
+        var reversed: [3]u8 = undefined;
+        var len: usize = 0;
+        while (true) {
+            reversed[len] = digits[value % 10];
+            len += 1;
+            value /= 10;
+            if (value == 0) break;
+        }
+        buffer[0] = 'q';
+        for (reversed[0..len], 0..) |digit, k| buffer[len - k] = digit;
+        slot.* = buffer[0 .. len + 1];
+    }
+    return out;
+}
+
+test "a large question set and a deep Score compile without the caller raising the quota" {
+    const gpa = std.testing.allocator;
+    const wire = @import("wire.zig");
+    var failure = json.Failure{};
+
+    // 150 questions: the budget is charged per question, so a batch is the
+    // shape that reaches the comptime limit first. Without the margins in
+    // `checkEntry` and `Score.writeFields` this does not build.
+    const names = comptime numberedNames(150);
+    const one = comptime noul("Does this convey urgency?", .{});
+    const Batch = @Struct(.auto, null, &names, &@splat(@TypeOf(one)), &@splat(.{}));
+    const batch: Batch = comptime blk: {
+        var out: Batch = undefined;
+        for (std.meta.fields(Batch)) |field| @field(out, field.name) = one;
+        break :blk out;
+    };
+    // No `Answers` call here: it raises the quota for the whole evaluation and
+    // would mask the margins this test exists to protect.
+    const body = try wire.encodeAsk(gpa, "hi", "m", batch, &failure);
+    gpa.free(body);
+
+    // 100 levels: each level is checked and its stored type built as well.
+    const levels = [_][]const u8{"level"} ** 100;
+    const deep = .{ .severity = score("How severe is this?", levels) };
+    const deep_body = try wire.encodeAsk(gpa, "hi", "m", deep, &failure);
+    gpa.free(deep_body);
 }

@@ -438,7 +438,7 @@ fn writeAnswers(
                 try jws.write(answer.confidence);
             },
             .score => {
-                const levels = question.scoreLevels(@field(questions, field.name));
+                const levels = @field(questions, field.name).levels;
                 try jws.objectField("score");
                 try jws.write(answer.score);
                 try jws.objectField("legend");

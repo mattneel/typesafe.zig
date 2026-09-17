@@ -11,7 +11,8 @@ const std = @import("std");
 ///
 /// | Error | Trigger | Retried by default |
 /// | --- | --- | --- |
-/// | `InvalidRequest` | The request failed client-side checks before it was sent (for example a string that is not valid UTF-8, a NaN, an invalid per-call option or header, or an HTTPS base URL with a proxy configured) | no |
+/// | `InvalidRequest` | The request could not be encoded: a string that is not valid UTF-8, a NaN, invalid or too deeply nested `RawJson`, an empty Noul, a `null` Score level, a state that is not a string, object or array | no |
+/// | `InvalidOption` | A per-call option is invalid: an empty model, a timeout above `Client.max_timeout`, a reserved extra header, or an HTTPS base URL with a proxy configured. `Diagnostics.path` names the option | no |
 /// | `BadRequest` | HTTP 400, for example an unknown model | no |
 /// | `Unauthorized` | HTTP 401, a missing or invalid API key | no |
 /// | `PermissionDenied` | HTTP 403 | no |
@@ -31,6 +32,7 @@ const std = @import("std");
 /// | `OutOfMemory` | An allocation failed | no |
 pub const Error = error{
     InvalidRequest,
+    InvalidOption,
     BadRequest,
     Unauthorized,
     PermissionDenied,

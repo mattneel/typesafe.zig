@@ -17,6 +17,15 @@ pub fn build(b: *std.Build) void {
 
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "version", manifest.version);
+    // The hourly refresh of the clock and system root certificates reads
+    // `std.http.Client` fields that std does not promise to keep. Consumers
+    // that would rather track std themselves can turn it off.
+    const tls_trust_refresh = b.option(
+        bool,
+        "tls-trust-refresh",
+        "Reload the system root certificates and the clock hourly (default: true)",
+    ) orelse true;
+    build_options.addOption(bool, "tls_trust_refresh", tls_trust_refresh);
 
     const typesafe = b.addModule("typesafe", .{
         .root_source_file = b.path("src/typesafe.zig"),

@@ -72,8 +72,6 @@ pub const noul = question.noul;
 pub const choice = question.choice;
 /// Builds a Score question from ordered levels.
 pub const score = question.score;
-/// Adds wire fields to a question for API features newer than this client.
-pub const withExtra = question.withExtra;
 
 /// The three TypeSafe question types.
 pub const Kind = question.Kind;
@@ -83,8 +81,6 @@ pub const Noul = question.Noul;
 pub const Choice = question.Choice;
 /// A Score question with `level_count` levels.
 pub const Score = question.Score;
-/// A question carrying additional wire fields.
-pub const WithExtra = question.WithExtra;
 /// The answer to a Noul question: the probability of yes.
 pub const NoulAnswer = question.NoulAnswer;
 /// The answer to a Choice question over `Option`.
