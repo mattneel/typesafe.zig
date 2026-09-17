@@ -155,8 +155,10 @@ typesafe.zig/
 ├── build.zig.zon           .name = .typesafe, .version, .fingerprint, .minimum_zig_version = "0.16.0", .paths
 ├── src/
 │   ├── typesafe.zig        root: re-exports Client, noul/choice/score, answer types, Error, Diagnostics, Retry, hooks, dynamic, testing
-│   ├── Client.zig          Client struct: init, initFromEnv, deinit, ask, askDynamic, listModels, Result, Models, transport, retry loop
-│   ├── question.zig        Noul, Choice(Option), Score(levels), Answers(Questions), the answer types and the comptime checks
+│   ├── Client.zig          Client struct: configuration, init, initFromEnv, deinit, ask, askDynamic, listModels, Result, Models
+│   ├── request.zig         one Call per ask or listModels: validation, headers, the retry loop, the timeout race, the TLS refresh
+│   ├── question.zig        Noul, Choice(Option), Score(levels), Answers(Questions) and the comptime checks
+│   ├── answer.zig          NoulAnswer, ChoiceAnswer(Option), ScoreAnswer(levels) and their helpers
 │   ├── wire.zig            encode request, decode response, error body parsing, test-response encoder
 │   ├── json.zig            the validating Encoder, the streaming path-tracking Reader, RawJson, Failure
 │   ├── Retry.zig           Retry policy struct, backoff and delay arithmetic, Retry-After parsing, retryable classification

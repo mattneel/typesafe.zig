@@ -45,6 +45,7 @@
 const std = @import("std");
 
 const question = @import("question.zig");
+const answer = @import("answer.zig");
 const errors = @import("errors.zig");
 const json = @import("json.zig");
 const wire = @import("wire.zig");
@@ -82,11 +83,11 @@ pub const Choice = question.Choice;
 /// A Score question with `level_count` levels.
 pub const Score = question.Score;
 /// The answer to a Noul question: the probability of yes.
-pub const NoulAnswer = question.NoulAnswer;
+pub const NoulAnswer = answer.NoulAnswer;
 /// The answer to a Choice question over `Option`.
-pub const ChoiceAnswer = question.ChoiceAnswer;
+pub const ChoiceAnswer = answer.ChoiceAnswer;
 /// The answer to a Score question with `level_count` levels.
-pub const ScoreAnswer = question.ScoreAnswer;
+pub const ScoreAnswer = answer.ScoreAnswer;
 /// The struct of typed answers for a questions struct.
 pub const Answers = question.Answers;
 /// Whether a type is a question built with `noul`, `choice` or `score`.
@@ -118,6 +119,7 @@ pub const testing = @import("testing.zig");
 test {
     std.testing.refAllDecls(@This());
     _ = question;
+    _ = answer;
     _ = errors;
     _ = json;
     _ = wire;

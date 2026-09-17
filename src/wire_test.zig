@@ -5,6 +5,7 @@ const std = @import("std");
 const testing = std.testing;
 const json = @import("json.zig");
 const question = @import("question.zig");
+const answer_types = @import("answer.zig");
 const wire = @import("wire.zig");
 
 const noul = question.noul;
@@ -287,9 +288,9 @@ test "questions: empty nouls and null levels found at run time are InvalidReques
 
 test "answers: margin is rounded to 10 decimal places" {
     const Pair = enum { a, b };
-    const answer: question.ChoiceAnswer(Pair) = .{ .choice = .a, .probabilities = .{ .a = 0.3, .b = 0.2 }, .confidence = 0.1 };
+    const answer: answer_types.ChoiceAnswer(Pair) = .{ .choice = .a, .probabilities = .{ .a = 0.3, .b = 0.2 }, .confidence = 0.1 };
     try testing.expectEqual(0.1, answer.margin());
-    const split: question.ChoiceAnswer(Pair) = .{ .choice = .a, .probabilities = .{ .a = 0.6, .b = 0.4 }, .confidence = 0.2 };
+    const split: answer_types.ChoiceAnswer(Pair) = .{ .choice = .a, .probabilities = .{ .a = 0.6, .b = 0.4 }, .confidence = 0.2 };
     try testing.expect(split.margin() >= 0.2);
 }
 

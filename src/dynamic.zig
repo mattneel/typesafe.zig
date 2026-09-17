@@ -25,6 +25,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const json = @import("json.zig");
 const question = @import("question.zig");
+const answer_types = @import("answer.zig");
 const wire = @import("wire.zig");
 
 /// A JSON value for instructions, descriptions, levels, criteria and extra
@@ -210,7 +211,7 @@ pub const Levels = union(enum) {
 
 /// The answer to a dynamic question.
 pub const Answer = union(question.Kind) {
-    noul: question.NoulAnswer,
+    noul: answer_types.NoulAnswer,
     choice: ChoiceAnswer,
     score: ScoreAnswer,
 };
@@ -272,7 +273,7 @@ pub const ChoiceAnswer = struct {
                 second = p;
             }
         }
-        return question.roundMargin(first - second);
+        return answer_types.roundMargin(first - second);
     }
 };
 
