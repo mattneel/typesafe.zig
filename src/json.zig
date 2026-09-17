@@ -461,100 +461,282 @@ pub fn encodeAlloc(allocator: Allocator, value: anytype, failure: *Failure) Enco
     return out.toOwnedSlice() catch error.OutOfMemory;
 }
 
-/// Reads a decoded `std.json.Value` tree, tracking the path so a mismatch can
-/// be reported as, say, `answers.tone.confidence: expected a number from 0 to 1`.
-pub const Decoder = struct {
+/// Reads a response body as a stream of JSON tokens, tracking the path to the
+/// value being read so a mismatch is reported as, say,
+/// `answers.tone.confidence: expected a number from 0 to 1`.
+///
+/// Strings and numbers point into the body unless they contain escapes, in
+/// which case they are allocated with the reader's allocator and live until
+/// `deinit`. A body that is not valid JSON, that ends early or that carries
+/// data after the document fails with `InvalidResponse`.
+pub const Reader = struct {
+    scanner: std.json.Scanner,
+    allocator: Allocator,
     segments: [max_depth]Segment = undefined,
     depth: usize = 0,
+    /// The path depth each open object's keys start at.
+    object_base: [max_depth]usize = undefined,
+    /// The path depth each open array's elements start at.
+    array_base: [max_depth]usize = undefined,
+    objects: usize = 0,
+    arrays: usize = 0,
     failure: Failure = .{},
 
-    pub const Error = error{InvalidResponse};
+    pub const Error = error{ InvalidResponse, OutOfMemory };
 
-    pub fn pushKey(dec: *Decoder, key: []const u8) void {
-        std.debug.assert(dec.depth < max_depth);
-        dec.segments[dec.depth] = .{ .key = key };
-        dec.depth += 1;
+    /// The longest string or number accepted in one value: the body length is
+    /// already bounded by the client's `max_response_bytes`.
+    pub const max_value_len = std.math.maxInt(u32);
+
+    /// `body` must be the whole document and must outlive the reader.
+    pub fn init(allocator: Allocator, body: []const u8) Reader {
+        return .{ .scanner = .initCompleteInput(allocator, body), .allocator = allocator };
     }
 
-    pub fn pushIndex(dec: *Decoder, index: usize) void {
-        std.debug.assert(dec.depth < max_depth);
-        dec.segments[dec.depth] = .{ .index = index };
-        dec.depth += 1;
-    }
-
-    pub fn pop(dec: *Decoder) void {
-        dec.depth -= 1;
+    pub fn deinit(reader: *Reader) void {
+        reader.scanner.deinit();
     }
 
     /// Records a failure at the current path and returns `error.InvalidResponse`.
-    pub fn fail(dec: *Decoder, comptime fmt: []const u8, args: anytype) error{InvalidResponse} {
-        dec.failure.setMessage(fmt, args);
-        dec.failure.setPath(dec.segments[0..dec.depth]);
+    pub fn fail(reader: *Reader, comptime fmt: []const u8, args: anytype) error{InvalidResponse} {
+        reader.failure.setMessage(fmt, args);
+        reader.failure.setPath(reader.segments[0..reader.depth]);
         return error.InvalidResponse;
     }
 
-    /// Returns the object map of `value`. The map is a shallow copy that
-    /// shares storage with `value`, for reading only.
-    pub fn object(dec: *Decoder, value: std.json.Value) Error!std.json.ObjectMap {
-        return switch (value) {
-            .object => |map| map,
-            else => dec.fail("expected an object, got {s}", .{kindName(value)}),
+    /// Records `missing required field` at `name` under the current path.
+    pub fn missingField(reader: *Reader, name: []const u8) error{InvalidResponse} {
+        reader.pushKey(name);
+        defer reader.pop();
+        return reader.fail("missing required field", .{});
+    }
+
+    pub fn pushKey(reader: *Reader, key: []const u8) void {
+        std.debug.assert(reader.depth < max_depth);
+        reader.segments[reader.depth] = .{ .key = key };
+        reader.depth += 1;
+    }
+
+    pub fn pushIndex(reader: *Reader, index: usize) void {
+        std.debug.assert(reader.depth < max_depth);
+        reader.segments[reader.depth] = .{ .index = index };
+        reader.depth += 1;
+    }
+
+    pub fn pop(reader: *Reader) void {
+        reader.depth -= 1;
+    }
+
+    /// Reads the opening brace of an object.
+    pub fn beginObject(reader: *Reader) Error!void {
+        try reader.expect(.object_begin);
+        if (reader.objects == max_depth) return reader.fail("value is nested more than {d} levels deep", .{max_depth});
+        reader.object_base[reader.objects] = reader.depth;
+        reader.objects += 1;
+    }
+
+    /// Reads the next key of the object, or returns `null` at its end. The key
+    /// stays on the path until the next key or the object's end.
+    pub fn nextKey(reader: *Reader) Error!?[]const u8 {
+        if (reader.objects == 0) return reader.fail("object key read outside an object", .{});
+        reader.unwind(reader.object_base[reader.objects - 1]);
+        return switch (try reader.peek()) {
+            .object_end => blk: {
+                _ = try reader.nextToken();
+                reader.objects -= 1;
+                reader.unwind(reader.object_base[reader.objects]);
+                break :blk null;
+            },
+            .string => blk: {
+                const key = try reader.readString();
+                reader.pushKey(key);
+                break :blk key;
+            },
+            else => |kind| reader.fail("expected an object key, got {s}", .{kindName(kind)}),
         };
     }
 
-    /// Returns the member `name` of `map`, failing when it is missing.
-    /// The path is not extended; callers push the key when descending.
-    pub fn field(dec: *Decoder, map: std.json.ObjectMap, name: []const u8) Error!std.json.Value {
-        return map.get(name) orelse {
-            dec.pushKey(name);
-            defer dec.pop();
-            return dec.fail("missing required field", .{});
+    /// Reads the opening bracket of an array.
+    pub fn beginArray(reader: *Reader) Error!void {
+        try reader.expect(.array_begin);
+        if (reader.arrays == max_depth) return reader.fail("value is nested more than {d} levels deep", .{max_depth});
+        reader.array_base[reader.arrays] = reader.depth;
+        reader.arrays += 1;
+    }
+
+    /// Reads the next element of the array, or returns `false` at its end.
+    /// `index` is the element's position, which goes on the path.
+    pub fn nextElement(reader: *Reader, index: usize) Error!bool {
+        if (reader.arrays == 0) return reader.fail("array element read outside an array", .{});
+        reader.unwind(reader.array_base[reader.arrays - 1]);
+        return switch (try reader.peek()) {
+            .array_end => blk: {
+                _ = try reader.nextToken();
+                reader.arrays -= 1;
+                reader.unwind(reader.array_base[reader.arrays]);
+                break :blk false;
+            },
+            else => blk: {
+                reader.pushIndex(index);
+                break :blk true;
+            },
         };
     }
 
-    pub fn string(dec: *Decoder, value: std.json.Value) Error![]const u8 {
-        return switch (value) {
-            .string => |s| s,
-            else => dec.fail("expected a string, got {s}", .{kindName(value)}),
-        };
+    /// Reads a string value.
+    pub fn string(reader: *Reader) Error![]const u8 {
+        return reader.readString();
     }
 
-    pub fn number(dec: *Decoder, value: std.json.Value) Error!f64 {
-        const result: f64 = switch (value) {
-            .integer => |i| @floatFromInt(i),
-            .float => |f| f,
-            .number_string => |s| std.fmt.parseFloat(f64, s) catch return dec.fail("expected a number", .{}),
-            else => return dec.fail("expected a number, got {s}", .{kindName(value)}),
-        };
-        if (!std.math.isFinite(result)) return dec.fail("expected a finite number", .{});
-        return result;
+    /// Reads a number value, which must be finite.
+    pub fn number(reader: *Reader) Error!f64 {
+        const text = try reader.readNumber();
+        const parsed = std.fmt.parseFloat(f64, text) catch return reader.fail("expected a number", .{});
+        if (!std.math.isFinite(parsed)) return reader.fail("expected a finite number", .{});
+        return parsed;
     }
 
-    /// A number from 0 to 1 inclusive.
-    pub fn probability(dec: *Decoder, value: std.json.Value) Error!f64 {
-        const p = try dec.number(value);
-        if (p < 0 or p > 1) return dec.fail("expected a number from 0 to 1, got {d}", .{p});
+    /// Reads a number from 0 to 1 inclusive.
+    pub fn probability(reader: *Reader) Error!f64 {
+        const p = try reader.number();
+        if (p < 0 or p > 1) return reader.fail("expected a number from 0 to 1, got {d}", .{p});
         return p;
     }
 
-    /// A non-negative integer, or `null` for a JSON `null`.
-    pub fn optionalCount(dec: *Decoder, value: std.json.Value) Error!?u64 {
-        return switch (value) {
-            .null => null,
-            .integer => |i| if (i >= 0) @intCast(i) else dec.fail("expected a non-negative integer, got {d}", .{i}),
-            else => dec.fail("expected a non-negative integer, got {s}", .{kindName(value)}),
+    /// Reads a non-negative integer, or `null` for a JSON `null`.
+    pub fn optionalCount(reader: *Reader) Error!?u64 {
+        return switch (try reader.peek()) {
+            .null => blk: {
+                _ = try reader.nextToken();
+                break :blk null;
+            },
+            .number => blk: {
+                const text = try reader.readNumber();
+                if (!std.json.isNumberFormattedLikeAnInteger(text)) {
+                    return reader.fail("expected a non-negative integer, got a number", .{});
+                }
+                const count = std.fmt.parseInt(i64, text, 10) catch
+                    return reader.fail("expected a non-negative integer, got a number", .{});
+                if (count < 0) return reader.fail("expected a non-negative integer, got {d}", .{count});
+                break :blk @intCast(count);
+            },
+            else => |kind| reader.fail("expected a non-negative integer, got {s}", .{kindName(kind)}),
+        };
+    }
+
+    /// Reads the next value as a `std.json.Value`, for a field the caller
+    /// keeps as JSON, such as a Score legend entry.
+    pub fn value(reader: *Reader) Error!std.json.Value {
+        return std.json.Value.jsonParse(reader.allocator, &reader.scanner, .{ .max_value_len = max_value_len }) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => reader.fail("response body is not valid JSON: {t}", .{err}),
+        };
+    }
+
+    /// Skips the next value, whatever it is.
+    pub fn skipValue(reader: *Reader) Error!void {
+        reader.scanner.skipValue() catch |err| return reader.scannerError(err);
+    }
+
+    /// Fails unless the document ends here, so trailing data is reported
+    /// rather than ignored. The scanner rejects a second top-level value
+    /// itself, so either outcome reports the same thing.
+    pub fn endDocument(reader: *Reader) Error!void {
+        const kind = reader.peek() catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidResponse => return reader.fail("unexpected data after the response body", .{}),
+        };
+        if (kind != .end_of_document) return reader.fail("unexpected data after the response body", .{});
+    }
+
+    fn unwind(reader: *Reader, base: usize) void {
+        while (reader.depth > base) reader.pop();
+    }
+
+    fn expect(reader: *Reader, comptime wanted: std.json.TokenType) Error!void {
+        const kind = try reader.peek();
+        if (kind != wanted) return reader.fail("expected {s}, got {s}", .{ expectedName(wanted), kindName(kind) });
+        _ = try reader.nextToken();
+    }
+
+    fn peek(reader: *Reader) Error!std.json.TokenType {
+        return reader.scanner.peekNextTokenType() catch |err| return reader.scannerError(err);
+    }
+
+    fn nextToken(reader: *Reader) Error!std.json.Token {
+        return reader.scanner.next() catch |err| return reader.scannerError(err);
+    }
+
+    fn readString(reader: *Reader) Error![]const u8 {
+        const token = reader.scanner.nextAllocMax(reader.allocator, .alloc_if_needed, max_value_len) catch |err|
+            return reader.scannerError(err);
+        return switch (token) {
+            .string => |text| text,
+            .allocated_string => |text| text,
+            else => reader.fail("expected a string, got {s}", .{tokenName(token)}),
+        };
+    }
+
+    fn readNumber(reader: *Reader) Error![]const u8 {
+        const token = reader.scanner.nextAllocMax(reader.allocator, .alloc_if_needed, max_value_len) catch |err|
+            return reader.scannerError(err);
+        return switch (token) {
+            .number => |text| text,
+            .allocated_number => |text| text,
+            else => reader.fail("expected a number, got {s}", .{tokenName(token)}),
+        };
+    }
+
+    fn scannerError(reader: *Reader, err: anyerror) Error {
+        return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.ValueTooLong => reader.fail("a value in the response body is too long", .{}),
+            else => reader.fail("response body is not valid JSON: {t}", .{err}),
         };
     }
 };
 
-fn kindName(value: std.json.Value) []const u8 {
-    return switch (value) {
-        .null => "null",
-        .bool => "a boolean",
-        .integer, .float, .number_string => "a number",
+fn expectedName(comptime kind: std.json.TokenType) []const u8 {
+    return switch (kind) {
+        .object_begin => "an object",
+        .array_begin => "an array",
         .string => "a string",
-        .array => "an array",
-        .object => "an object",
+        .number => "a number",
+        else => @compileError("no expectation name for " ++ @tagName(kind)),
+    };
+}
+
+/// The name of a token type, for a message such as `expected a string, got a
+/// number`.
+fn kindName(kind: std.json.TokenType) []const u8 {
+    return switch (kind) {
+        .object_begin, .object_end => "an object",
+        .array_begin, .array_end => "an array",
+        .true, .false => "a boolean",
+        .null => "null",
+        .number => "a number",
+        .string => "a string",
+        .end_of_document => "the end of the response body",
+    };
+}
+
+/// The same, for a token that has been read.
+fn tokenName(token: std.json.Token) []const u8 {
+    return switch (token) {
+        .object_begin, .object_end => "an object",
+        .array_begin, .array_end => "an array",
+        .true, .false => "a boolean",
+        .null => "null",
+        .number, .partial_number, .allocated_number => "a number",
+        .string,
+        .partial_string,
+        .partial_string_escaped_1,
+        .partial_string_escaped_2,
+        .partial_string_escaped_3,
+        .partial_string_escaped_4,
+        .allocated_string,
+        => "a string",
+        .end_of_document => "the end of the response body",
     };
 }
 
@@ -652,23 +834,60 @@ test "encoder writes tagged unions as single-key objects" {
     try std.testing.expectEqualStrings("[{\"text\":\"x\"},{\"empty\":{}}]", out);
 }
 
-test "decoder reports paths" {
-    const gpa = std.testing.allocator;
-    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, "{\"answers\":{\"tone\":{\"confidence\":1.5}}}", .{});
-    defer parsed.deinit();
+test "reader reports paths and token failures" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
 
-    var dec: Decoder = .{};
-    const root = try dec.object(parsed.value);
-    dec.pushKey("answers");
-    const answers = try dec.object(try dec.field(root, "answers"));
-    dec.pushKey("tone");
-    const tone = try dec.object(try dec.field(answers, "tone"));
-    dec.pushKey("confidence");
-    try std.testing.expectError(error.InvalidResponse, dec.probability(try dec.field(tone, "confidence")));
-    try std.testing.expectEqualStrings("answers.tone.confidence", dec.failure.path());
-    try std.testing.expectEqualStrings("expected a number from 0 to 1, got 1.5", dec.failure.message());
-    dec.pop();
+    const body = "{\"answers\":{\"tone\":{\"confidence\":1.5}}}";
+    var reader: Reader = .init(arena.allocator(), body);
+    defer reader.deinit();
 
-    try std.testing.expectError(error.InvalidResponse, dec.field(tone, "missing"));
-    try std.testing.expectEqualStrings("answers.tone.missing", dec.failure.path());
+    try reader.beginObject();
+    try std.testing.expectEqualStrings("answers", (try reader.nextKey()).?);
+    try reader.beginObject();
+    try std.testing.expectEqualStrings("tone", (try reader.nextKey()).?);
+    try reader.beginObject();
+    try std.testing.expectEqualStrings("confidence", (try reader.nextKey()).?);
+    try std.testing.expectError(error.InvalidResponse, reader.probability());
+    try std.testing.expectEqualStrings("answers.tone.confidence", reader.failure.path());
+    try std.testing.expectEqualStrings("expected a number from 0 to 1, got 1.5", reader.failure.message());
+    try std.testing.expectEqual(null, try reader.nextKey());
+    try std.testing.expectEqual(null, try reader.nextKey());
+    try std.testing.expectEqual(null, try reader.nextKey());
+    try reader.endDocument();
+}
+
+test "reader reports missing fields and object shape" {
+    var reader: Reader = .init(std.testing.allocator, "{\"a\":[1,2]}");
+    defer reader.deinit();
+    try reader.beginObject();
+    try std.testing.expectEqualStrings("a", (try reader.nextKey()).?);
+    try std.testing.expectError(error.InvalidResponse, reader.beginObject());
+    try std.testing.expectEqualStrings("expected an object, got an array", reader.failure.message());
+    try std.testing.expectEqualStrings("a", reader.failure.path());
+    try reader.skipValue();
+    try std.testing.expectEqual(null, try reader.nextKey());
+    reader.failure = .{};
+    const missing: Reader.Error!void = reader.missingField("b");
+    try std.testing.expectError(error.InvalidResponse, missing);
+    try std.testing.expectEqualStrings("missing required field", reader.failure.message());
+    try std.testing.expectEqualStrings("b", reader.failure.path());
+}
+
+test "reader reports a body that is not JSON" {
+    var reader: Reader = .init(std.testing.allocator, "{\"a\":");
+    defer reader.deinit();
+    try reader.beginObject();
+    try std.testing.expectEqualStrings("a", (try reader.nextKey()).?);
+    try std.testing.expectError(error.InvalidResponse, reader.skipValue());
+    try std.testing.expect(std.mem.startsWith(u8, reader.failure.message(), "response body is not valid JSON"));
+}
+
+test "reader rejects trailing data" {
+    var reader: Reader = .init(std.testing.allocator, "{} true");
+    defer reader.deinit();
+    try reader.beginObject();
+    try std.testing.expectEqual(null, try reader.nextKey());
+    try std.testing.expectError(error.InvalidResponse, reader.endDocument());
+    try std.testing.expectEqualStrings("unexpected data after the response body", reader.failure.message());
 }

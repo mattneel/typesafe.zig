@@ -282,9 +282,10 @@ pub fn Result(comptime Questions: type) type {
         request_id: ?[]const u8,
         /// Attempts made, including the first.
         attempts: u32,
-        /// The whole decoded response body, including fields and answers
-        /// this version of the client does not know.
-        raw: std.json.Value,
+        /// The response body exactly as the server sent it, for fields this
+        /// version of the client does not know. It lives in the result's
+        /// arena, like everything else the result owns.
+        body: []const u8,
         /// Owns every string and JSON value above.
         arena: *std.heap.ArenaAllocator,
 
@@ -304,7 +305,9 @@ pub const Models = struct {
     models: []const wire.Model,
     request_id: ?[]const u8,
     attempts: u32,
-    raw: std.json.Value,
+    /// The response body exactly as the server sent it. It lives in the
+    /// result's arena.
+    body: []const u8,
     arena: *std.heap.ArenaAllocator,
 
     /// Returns the model named `name`, if the account has it.
@@ -377,13 +380,14 @@ fn askTyped(call: *Call, state: anytype, questions: anytype) Error!Result(@TypeO
 
     const arena = try createArena(gpa);
     errdefer destroyArena(arena);
-    const root = try call.parseBody(arena.allocator(), response);
+    // The decoded strings point into this copy of the body, so it is made
+    // before anything is read from it and freed with the arena.
+    const response_body = try arena.allocator().dupe(u8, response.body);
+    var reader: json.Reader = .init(arena.allocator(), response_body);
+    defer reader.deinit();
 
-    var dec: json.Decoder = .{};
-    const decoded = wire.decodeAsk(Questions, &dec, root) catch |err| {
-        call.noteDecodeFailure(&dec.failure, response);
-        return err;
-    };
+    const decoded = wire.decodeAsk(Questions, &reader) catch |err| return call.decodeFailure(err, &reader, response);
+    reader.endDocument() catch |err| return call.decodeFailure(err, &reader, response);
     call.input_tokens = decoded.usage.input_tokens;
     call.output_tokens = decoded.usage.output_tokens;
 
@@ -393,7 +397,7 @@ fn askTyped(call: *Call, state: anytype, questions: anytype) Error!Result(@TypeO
         .usage = decoded.usage,
         .request_id = try call.request_id.dupe(arena.allocator()),
         .attempts = call.attempts,
-        .raw = root,
+        .body = response_body,
         .arena = arena,
     };
 }
@@ -439,16 +443,13 @@ fn askDynamicInner(call: *Call, state: anytype, questions: []const dynamic.Quest
 
     const arena = try createArena(gpa);
     errdefer destroyArena(arena);
-    const root = try call.parseBody(arena.allocator(), response);
+    const response_body = try arena.allocator().dupe(u8, response.body);
+    var reader: json.Reader = .init(arena.allocator(), response_body);
+    defer reader.deinit();
 
-    var dec: json.Decoder = .{};
-    const decoded = dynamic_wire.decodeResponse(arena.allocator(), &dec, questions, root) catch |err| switch (err) {
-        error.OutOfMemory => |e| return e,
-        error.InvalidResponse => |e| {
-            call.noteDecodeFailure(&dec.failure, response);
-            return e;
-        },
-    };
+    const decoded = dynamic_wire.decodeResponse(arena.allocator(), &reader, questions) catch |err|
+        return call.decodeFailure(err, &reader, response);
+    reader.endDocument() catch |err| return call.decodeFailure(err, &reader, response);
     call.input_tokens = decoded.usage.input_tokens;
     call.output_tokens = decoded.usage.output_tokens;
 
@@ -458,7 +459,7 @@ fn askDynamicInner(call: *Call, state: anytype, questions: []const dynamic.Quest
         .usage = decoded.usage,
         .request_id = try call.request_id.dupe(arena.allocator()),
         .attempts = call.attempts,
-        .raw = root,
+        .body = response_body,
         .arena = arena,
     };
 }
@@ -491,21 +492,18 @@ fn listModelsInner(call: *Call) Error!Models {
 
     const arena = try createArena(gpa);
     errdefer destroyArena(arena);
-    const root = try call.parseBody(arena.allocator(), response);
+    const response_body = try arena.allocator().dupe(u8, response.body);
+    var reader: json.Reader = .init(arena.allocator(), response_body);
+    defer reader.deinit();
 
-    var dec: json.Decoder = .{};
-    const models = wire.decodeModels(arena.allocator(), &dec, root) catch |err| switch (err) {
-        error.OutOfMemory => |e| return e,
-        error.InvalidResponse => |e| {
-            call.noteDecodeFailure(&dec.failure, response);
-            return e;
-        },
-    };
+    const models = wire.decodeModels(arena.allocator(), &reader) catch |err|
+        return call.decodeFailure(err, &reader, response);
+    reader.endDocument() catch |err| return call.decodeFailure(err, &reader, response);
     return .{
         .models = models,
         .request_id = try call.request_id.dupe(arena.allocator()),
         .attempts = call.attempts,
-        .raw = root,
+        .body = response_body,
         .arena = arena,
     };
 }
@@ -1172,17 +1170,12 @@ const Call = struct {
         return connection.stream_writer.err orelse error.WriteFailed;
     }
 
-    /// Parses a 2xx body as JSON into `arena`.
-    fn parseBody(call: *Call, arena: Allocator, response: Response) Error!std.json.Value {
-        return std.json.parseFromSliceLeaky(std.json.Value, arena, response.body, .{
-            .allocate = .alloc_always,
-            .max_value_len = response.body.len,
-        }) catch |err| switch (err) {
-            error.OutOfMemory => |e| return e,
-            else => {
-                if (call.noteResponse(response)) |d| {
-                    d.setPrint("message", "response body is not valid JSON: {t}", .{err});
-                }
+    /// Records a decoding failure in the diagnostics and returns it.
+    fn decodeFailure(call: *Call, err: json.Reader.Error, reader: *json.Reader, response: Response) Error {
+        return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.InvalidResponse => {
+                call.noteDecodeFailure(&reader.failure, response);
                 return error.InvalidResponse;
             },
         };

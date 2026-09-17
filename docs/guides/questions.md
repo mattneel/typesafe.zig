@@ -193,31 +193,6 @@ fn invoiceNumberIsCorrect(client: *typesafe.Client, invoice: Invoice, extracted:
 
 When the shape itself comes from data, use [dynamic questions](#questions-defined-at-run-time).
 
-## Extra wire fields
-
-When the API gains a question field this client does not know yet, `typesafe.withExtra` adds it.
-The second argument is a struct literal whose fields are written after the question's own
-`type`, `instructions` and `criteria`:
-
-```zig
-const questions = .{
-    .is_spam = typesafe.withExtra(typesafe.noul("Is this spam?", .{}), .{ .future_field = true }),
-};
-```
-
-The request's `questions` member is then:
-
-```json
-{"is_spam":{"type":"noul","instructions":"Is this spam?","future_field":true}}
-```
-
-The result is a `typesafe.WithExtra` question with the same kind and answer type, so
-`result.answers.is_spam` is still a `NoulAnswer`. Extra values are encoded and checked like any
-other value. These are compile errors: an extra field named `type`, `instructions` or
-`criteria`, calling `withExtra` on a question that already has extras (pass every field to one
-call), and calling it on something that is not a question. The API ignores question fields it
-does not know, so extras are safe to send.
-
 ## Question ids
 
 The field names of the questions struct are the question ids, and `result.answers` has the same
@@ -268,8 +243,6 @@ These mistakes stop the build with a `typesafe:` compile error:
 - Instructions, a Choice description, a Noul criterion or a Score level is a `bool`, an integer
   or a float, directly, through an optional such as `??bool`, or behind a pointer such as
   `*bool`: "noul instructions must be a string, a JSON object or array, or null, got bool".
-- `withExtra` names an extra field `type`, `instructions` or `criteria`, is called on a question
-  that already has extras, or is called on something that is not a question.
 
 The encoder also rejects, at compile time, values that have no JSON form: an untagged union, a
 many-item pointer without a sentinel, or a type such as a function.
@@ -368,8 +341,9 @@ path and the problem, such as `answers.department.choice` and
 
 Everything else is ignored: answers you did not ask for (including answers of a type this
 version does not know), and fields it does not know at any level. A missing `usage` or token
-count comes back as `null`. A newer server never breaks an older client, and `result.raw` keeps
-the whole decoded body, so you can read a new field before the client exposes it.
+count comes back as `null`. A newer server never breaks an older client, and `result.body` keeps
+the response as the server sent it, so you can read a new field before the client exposes it. A
+key repeated in one object keeps its last value.
 
 ## Questions defined at run time
 

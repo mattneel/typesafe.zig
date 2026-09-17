@@ -166,20 +166,6 @@ instructions and criteria all turn out empty at run time, or a `null` Score leve
 one of your own: the client writes it with that method, unchecked. See the
 [Questions guide](docs/guides/questions.md) for how to have such a type checked too.
 
-### Extra wire fields
-
-For an API feature newer than this client, `typesafe.withExtra` adds fields to a question. They
-are written after the question's own members, and the question keeps its kind and answer type:
-
-```zig
-const questions = .{
-    .is_spam = typesafe.withExtra(typesafe.noul("Is this spam?", .{}), .{ .future_field = true }),
-};
-```
-
-The API ignores question fields it does not know, so extras are safe to send. Dynamic questions
-take them in `dynamic.Question.extra`.
-
 ## What you get back
 
 `client.ask` returns a `typesafe.Result(@TypeOf(questions))`. Call `deinit` to free it.
@@ -191,13 +177,13 @@ take them in `dynamic.Question.extra`.
 | `usage` | `typesafe.Usage` | `input_tokens` and `output_tokens`, each `?u64` |
 | `request_id` | `?[]const u8` | the `x-typesafe-request-id` header; quote it when contacting support |
 | `attempts` | `u32` | attempts made, including the first |
-| `raw` | `std.json.Value` | the whole decoded body, including fields this version does not know |
+| `body` | `[]const u8` | the response body as the server sent it, for fields this version does not know |
 
 | Answer | Fields | Helpers |
 | --- | --- | --- |
 | `NoulAnswer` | `noul: f64` | `isYes(threshold)` |
 | `ChoiceAnswer(E)` | `choice: E`, `probabilities` (one `f64` field per tag), `confidence: f64` | `probability(tag)`, `ranked()`, `margin()` |
-| `ScoreAnswer(N)` | `score: f64`, `probabilities: [N]f64`, `confidence: f64`, `legend: [N]std.json.Value` | `expectedLevel()`, `maxLevel()`, `ranked()` |
+| `ScoreAnswer(N)` | `score: f64`, `probabilities: [N]f64`, `confidence: f64`, `legend: [N]std.json.Value` | `probability(level)`, `expectedLevel()`, `maxLevel()`, `ranked()` |
 
 `ranked()` returns a fixed-size array sorted from most to least likely, `margin()` is the top
 probability minus the second (rounded to 10 decimal places, so 0.3 minus 0.2 is exactly 0.1),
@@ -207,7 +193,7 @@ how to turn these into decisions.
 
 Noul and Choice answers, and a Score answer's `score`, `probabilities` and `confidence`, are plain
 numbers and enums: copy them out and keep them after `deinit`. Everything that points into
-memory lives in the result's arena and is freed by `deinit`: `model`, `request_id`, `raw`, and a
+memory lives in the result's arena and is freed by `deinit`: `model`, `request_id`, `body`, and a
 Score answer's `legend`.
 
 Decoding is strict about what the client relies on and lenient about everything else. Every
@@ -254,7 +240,7 @@ Each call takes options that override the client's for that call: `model`, `time
 `extra_headers`, plus `diagnostics` and `user_data`. An unset (`null`) per-call option uses the
 client's value; to turn the timeout off for one call, pass `.timeout = .max`. An invalid per-call
 option, such as an empty `model`, a reserved header or a timeout above `Client.max_timeout`,
-fails the call with `error.InvalidRequest`, and the diagnostics `path` names the option.
+fails the call with `error.InvalidOption`, and the diagnostics `path` names the option.
 
 ```zig
 var result = try client.ask(state, questions, .{ .model = "jev-preview", .retry = .disabled });
@@ -264,7 +250,7 @@ For tuning the client does not wrap, such as `connection_pool.free_size`, `clien
 underlying `std.http.Client`. Do not give it an HTTPS proxy: `std.http.Client` in Zig 0.16 does
 not run TLS inside a proxy tunnel, so the API key would travel in plaintext. While
 `client.http.https_proxy` is set and the base URL is `https`, every call fails with
-`error.InvalidRequest` and the diagnostics `path` is `base_url`. Each attempt also refuses to send
+`error.InvalidOption` and the diagnostics `path` is `base_url`. Each attempt also refuses to send
 over a connection that is not TLS or that goes through a proxy.
 
 The client identifies itself with `User-Agent` and `X-TypeSafe-SDK: typesafe-zig/<version>`
@@ -275,7 +261,10 @@ base URL's host.
 `std.http.Client` reads the clock and the system's root certificates once, at its first HTTPS
 request, and checks every later certificate against them. A long-running client reloads both
 before an HTTPS request once they are an hour old, so a certificate issued after the client
-started is accepted and one that has since expired is not.
+started is accepted and one that has since expired is not. That refresh reads `std.http.Client`
+fields std does not promise to keep; build with `-Dtls-trust-refresh=false` (or
+`.tls_trust_refresh = false` through `b.dependency`) to leave it out and stay on std's supported
+surface.
 
 ## Errors and diagnostics
 
@@ -309,7 +298,8 @@ BadRequest (HTTP 400): Unknown model: jev-0.0.1 [POST https://api.typesafe.ai/v1
 
 | Error | Trigger | Retried by default |
 | --- | --- | --- |
-| `InvalidRequest` | Client-side checks failed before sending (invalid UTF-8, NaN, an invalid per-call option, an invalid dynamic question, an HTTPS proxy) | no |
+| `InvalidRequest` | The request could not be encoded (invalid UTF-8, NaN, invalid or too deep `RawJson`, an empty Noul, a `null` Score level, a state that is not a string, object or array) | no |
+| `InvalidOption` | A per-call option is invalid (an empty model, a reserved header, a timeout above `Client.max_timeout`, an HTTPS base URL with a proxy); the diagnostics `path` names the option | no |
 | `BadRequest` | HTTP 400, such as an unknown model | no |
 | `Unauthorized` | HTTP 401 | no |
 | `PermissionDenied` | HTTP 403 | no |

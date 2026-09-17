@@ -319,8 +319,9 @@ pub const Result = struct {
     request_id: ?[]const u8,
     /// Attempts made, including the first.
     attempts: u32,
-    /// The whole decoded response body.
-    raw: std.json.Value,
+    /// The response body exactly as the server sent it, for fields this
+    /// version of the client does not know.
+    body: []const u8,
     /// Owns every string, slice and JSON value above.
     arena: *std.heap.ArenaAllocator,
 

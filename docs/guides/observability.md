@@ -31,8 +31,8 @@ defer result.deinit();
 | `request_id` | `?[]const u8` | the `x-typesafe-request-id` header of the final response |
 | `error_type` | `?[]const u8` | the server's error category from `detail.error_type`, such as `authentication_error` or `api_usage_error` |
 | `message` | `?[]const u8` | the server's message for an HTTP error, or what failed for a client-side or decoding error |
-| `body` | `?[]const u8` | the raw body of an error response or an undecodable 2xx response, capped at `Diagnostics.max_body_bytes` (64 KiB) |
-| `path` | `?[]const u8` | for `InvalidRequest` and `InvalidResponse`, the path to the offending value, such as `state.ticket.text` or `answers.tone.confidence` |
+| `body` | `?[]const u8` | the body of an error response or an undecodable 2xx response, capped at `Diagnostics.max_body_bytes` (64 KiB) |
+| `path` | `?[]const u8` | for `InvalidRequest`, `InvalidOption` and `InvalidResponse`, the path to the offending value or option, such as `state.ticket.text`, `timeout` or `answers.tone.confidence` |
 | `retry_after_ms` | `?u64` | the wait the final response asked for, from `retry-after-ms` or `Retry-After` |
 | `attempts` | `u32` | attempts made, including the first; `0` when the call failed before sending |
 | `cause` | `?anyerror` | the underlying error behind a transport failure, such as `error.ConnectionRefused` behind `ConnectionFailed`, or `error.ResponseTruncated` when a closed connection cut a body short |
@@ -50,7 +50,7 @@ use the name in logs rather than switching on it.
   counts every attempt, including failed ones that were retried.
 - Strings belong to the diagnostics. They stay valid until the next call that uses it, `reset`,
   or `deinit`.
-- A call whose own options are invalid fails with `InvalidRequest`, `attempts` 0, and `path`
+- A call whose own options are invalid fails with `InvalidOption`, `attempts` 0, and `path`
   naming the option: `model`, `timeout`, `retry`, `extra_headers`, or `base_url` when
   `client.http.https_proxy` is set for an `https` base URL.
 - Only the first `Diagnostics.max_body_bytes` (64 KiB) of an error body are parsed for the
@@ -132,8 +132,8 @@ var client: typesafe.Client = try .init(gpa, io, .{
 
 Every call that fires `onRequestStart` fires `onRequestEnd`. A call whose own options are invalid
 (an empty `model`, a timeout that is not positive or longer than a year, a reserved header, an
-HTTPS proxy) and a request that fails to encode both end with `err` set to `InvalidRequest` and 0
-attempts. Only running out of memory before the call starts skips both hooks.
+HTTPS proxy) ends with `err` set to `InvalidOption`; a request that fails to encode ends with
+`InvalidRequest`. Both have 0 attempts. Only running out of memory before the call starts skips both hooks.
 
 A request sent again because its pooled keep-alive connection had been closed by the server is
 not a retry: it fires no `onRetry` and does not count as an attempt.

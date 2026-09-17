@@ -34,9 +34,6 @@ requires Zig 0.16.0 or later and uses only the standard library.
   a few dozen questions and Scores with dozens of levels compile as they are; an unusually large
   set can still reach the comptime branch limit, which the compiler reports and names
   `@setEvalBranchQuota` for.
-- `typesafe.withExtra`, which adds wire fields to a question for API features newer than the
-  client, keeping its kind and answer type, and `dynamic.Question.extra` for the same on dynamic
-  questions.
 - `Client.askDynamic` and `typesafe.dynamic` for questions defined at run time, validated before
   sending. `dynamic.Json` values report their JSON type with `kind()` and absence with
   `isEmpty()`.
@@ -48,12 +45,15 @@ requires Zig 0.16.0 or later and uses only the standard library.
   all empty at run time and a `null` Score level with `error.InvalidRequest` and a path to the
   value. Types with their own `jsonStringify` are written by it unchecked; a
   `writeTypesafeJson` method has the encoder check a type's contents.
-- Strict, forward-compatible decoding with field paths in errors, such as
-  `answers.tone.confidence: expected a number from 0 to 1`. Unknown answers and fields are
-  ignored. gzip and deflate response bodies are decoded; any other content encoding is
+- Strict, forward-compatible decoding in one pass over the response bytes (no intermediate
+  `std.json.Value` tree), with field paths in errors, such as
+  `answers.tone.confidence: expected a number from 0 to 1`. Answer strings point into the
+  response body, which the result keeps as `body`. Unknown answers and fields are skipped, keys
+  may arrive in any order, a repeated key keeps its last value, and a body that is not valid
+  JSON, ends early or carries trailing data is `error.InvalidResponse`. gzip and deflate response bodies are decoded; any other content encoding is
   `error.InvalidResponse`.
 - Answer helpers: `NoulAnswer.isYes`, `ChoiceAnswer.probability`, `ranked` and `margin`, and
-  `ScoreAnswer.expectedLevel`, `maxLevel` and `ranked`. Dynamic answers have `probability`,
+  `ScoreAnswer.probability`, `expectedLevel`, `maxLevel` and `ranked`. Dynamic answers have `probability`,
   `ranked` and `margin` (Choice) and `expectedLevel` and `maxLevel` (Score). `margin` is rounded
   to 10 decimal places, as in the Elixir client.
 - `typesafe.Error`, one error set for every call, and `typesafe.Diagnostics`, an optional
@@ -73,9 +73,12 @@ requires Zig 0.16.0 or later and uses only the standard library.
   pooled connection the server has closed is replaced without using an attempt; a body cut short
   by a closed connection is a retryable `error.ConnectionFailed`; a body of exactly
   `max_response_bytes` is accepted. A long-running client reloads the clock and system root
-  certificates it checks TLS certificates against every hour. HTTPS through a proxy is refused
-  with `error.InvalidRequest`, because `std.http.Client` 0.16 would not encrypt the proxied
-  connection.
+  certificates it checks TLS certificates against every hour, behind
+  `-Dtls-trust-refresh` (on by default; `.tls_trust_refresh = false` through `b.dependency`
+  leaves it out). HTTPS through a proxy is refused
+  with `error.InvalidOption`, because `std.http.Client` 0.16 would not encrypt the proxied
+  connection. Per-call option and header mistakes are `error.InvalidOption` too, with the option
+  in `Diagnostics.path`; `error.InvalidRequest` is only for a request that cannot be encoded.
 - Identification headers in the format of TypeSafe's official SDKs (`User-Agent`,
   `X-TypeSafe-SDK`, `X-TypeSafe-Runtime`, `X-TypeSafe-Retry-Count`), identifying this client as
   `typesafe-zig/<version>`. Redirects are never followed.

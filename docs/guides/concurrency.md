@@ -144,7 +144,7 @@ var result = try client.ask(report, questions, .{ .timeout = .fromSeconds(60) })
 ```
 
 A timeout that is not positive or is longer than `Client.max_timeout` (one year) fails the call
-with `error.InvalidRequest`.
+with `error.InvalidOption`.
 
 ## Cancelation
 

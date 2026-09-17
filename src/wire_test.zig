@@ -153,10 +153,10 @@ test "request fixture: structured taxonomy" {
 }
 
 fn decodeFixture(comptime Questions: type, comptime fixture: []const u8, arena: std.mem.Allocator) !wire.Decoded(Questions) {
-    const root = try std.json.parseFromSliceLeaky(std.json.Value, arena, @embedFile("testdata/responses/" ++ fixture), .{});
-    var dec: json.Decoder = .{};
-    return wire.decodeAsk(Questions, &dec, root) catch |err| {
-        std.debug.print("decode failed at {s}: {s}\n", .{ dec.failure.path(), dec.failure.message() });
+    var reader: json.Reader = .init(arena, @embedFile("testdata/responses/" ++ fixture));
+    defer reader.deinit();
+    return wire.decodeAsk(Questions, &reader) catch |err| {
+        std.debug.print("decode failed at {s}: {s}\n", .{ reader.failure.path(), reader.failure.message() });
         return err;
     };
 }
@@ -253,17 +253,12 @@ test "encoder: truncated failure messages stay valid UTF-8" {
     var failure: json.Failure = .{};
     const name = "a" ++ "é" ** 200;
     const Q = .{ .x = question.noul("x", .{}) };
-    var parsed = try std.json.parseFromSlice(
-        std.json.Value,
-        gpa,
-        "{\"model\":\"m\",\"answers\":{\"x\":{\"type\":\"" ++ name ++ "\"}}}",
-        .{},
-    );
-    defer parsed.deinit();
-    var dec: json.Decoder = .{};
-    try testing.expectError(error.InvalidResponse, wire.decodeAsk(@TypeOf(Q), &dec, parsed.value));
-    try testing.expect(std.unicode.utf8ValidateSlice(dec.failure.message()));
-    try testing.expect(std.mem.endsWith(u8, dec.failure.message(), "..."));
+    const body = "{\"model\":\"m\",\"answers\":{\"x\":{\"type\":\"" ++ name ++ "\"}}}";
+    var reader: json.Reader = .init(gpa, body);
+    defer reader.deinit();
+    try testing.expectError(error.InvalidResponse, wire.decodeAsk(@TypeOf(Q), &reader));
+    try testing.expect(std.unicode.utf8ValidateSlice(reader.failure.message()));
+    try testing.expect(std.mem.endsWith(u8, reader.failure.message(), "..."));
     _ = &failure;
 }
 

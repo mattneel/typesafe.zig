@@ -24,8 +24,7 @@ up under test (a TLS flush gotcha and `io.async` versus `io.concurrent`); they a
 where they apply.
 
 Beyond the core, 0.1.0 ships the pieces the workflow needs: questions defined at run time
-(`typesafe.dynamic`), extra wire fields for API features newer than the client
-(`typesafe.withExtra`), observability callbacks (`typesafe.hooks`), a public loopback server for
+(`typesafe.dynamic`), observability callbacks (`typesafe.hooks`), a public loopback server for
 downstream tests (`typesafe.testing`), and the guides under `docs/guides/`.
 
 Design principles:
@@ -40,8 +39,9 @@ Design principles:
 - Standard library only. Zig has no package registry, every dependency is a hash the user has to
   trust, and `std` already covers HTTPS, JSON and concurrency.
 - Small surface, in layers: the five entry points (`Client.init`, `initFromEnv`, `deinit`, `ask`,
-  `listModels`) plus three question constructors cover the API; `askDynamic`, `withExtra`, `hooks`
-  and `testing` are separate opt-in modules that the core does not depend on.
+  `listModels`) plus three question constructors cover the API; `askDynamic`, `hooks` and
+  `testing` are separate opt-in modules that the core does not depend on. Anything the API does
+  not have a use for yet is left out rather than stubbed.
 
 Naming: repo `mattneel/typesafe.zig`, package name `.typesafe` in `build.zig.zon`, module
 `typesafe` (`@import("typesafe")`). The `.zig` suffix is a repo convention; the package name drops
@@ -154,11 +154,11 @@ typesafe.zig/
 ├── build.zig               module, test step, live-test step, examples step, docs step, fmt, ci
 ├── build.zig.zon           .name = .typesafe, .version, .fingerprint, .minimum_zig_version = "0.16.0", .paths
 ├── src/
-│   ├── typesafe.zig        root: re-exports Client, noul/choice/score/withExtra, answer types, Error, Diagnostics, Retry, hooks, dynamic, testing
+│   ├── typesafe.zig        root: re-exports Client, noul/choice/score, answer types, Error, Diagnostics, Retry, hooks, dynamic, testing
 │   ├── Client.zig          Client struct: init, initFromEnv, deinit, ask, askDynamic, listModels, Result, Models, transport, retry loop
-│   ├── question.zig        Noul, Choice(Option), Score(levels), WithExtra, Answers(Questions), the answer types and the comptime checks
+│   ├── question.zig        Noul, Choice(Option), Score(levels), Answers(Questions), the answer types and the comptime checks
 │   ├── wire.zig            encode request, decode response, error body parsing, test-response encoder
-│   ├── json.zig            the validating Encoder, the path-tracking Decoder, RawJson, Failure
+│   ├── json.zig            the validating Encoder, the streaming path-tracking Reader, RawJson, Failure
 │   ├── Retry.zig           Retry policy struct, backoff and delay arithmetic, Retry-After parsing, retryable classification
 │   ├── errors.zig          Error set, InitError set, status mapping
 │   ├── Diagnostics.zig     Diagnostics struct, init/deinit/reset, `{f}` formatting
@@ -227,12 +227,11 @@ Public declarations:
 | `noul(instructions, criteria) Noul` | `criteria` is a struct literal with optional `.yes` and `.no` entries, sent as the wire's `true` and `false`; `.{}` for none. A Noul needs instructions or at least one criterion |
 | `choice(comptime Options: type, instructions, descriptions) Choice(Options)` | `Options` must be an exhaustive enum with at least one tag, checked with `@compileError`; `descriptions` is a struct literal mapping some or all tags to descriptions, and tags left out are sent as `null` |
 | `score(instructions, levels) Score(levels.len)` | `levels` is a tuple or array of at least two entries, known in length at compile time; fewer than two is a `@compileError`, and the answer type is sized by the level count |
-| `withExtra(question, extra) WithExtra` | Adds wire fields after the question's own members, keeping its kind and answer type. `type`, `instructions` and `criteria` are rejected |
 | `Answers(Questions)` | The struct of typed answers, built with `@Struct` from the questions struct's field names and each question's `Answer` type |
 | `NoulAnswer`, `ChoiceAnswer(Option)`, `ScoreAnswer(N)` | The three answer types, with the helper methods listed under "What you get back" in the README |
 | `typesafe.RawJson` | Pre-encoded JSON text, sent verbatim after the encoder validates it (one value, at most 256 levels deep) |
-| `Result(Questions)` | `answers`, `model`, `usage` (`?u64` token counts), `request_id`, `attempts`, `raw: std.json.Value`, an owning `std.heap.ArenaAllocator`, `deinit()` |
-| `Models` | `models: []const Model`, `request_id`, `attempts`, `raw`, an owning arena, `find(name)`, `deinit()` |
+| `Result(Questions)` | `answers`, `model`, `usage` (`?u64` token counts), `request_id`, `attempts`, `body: []const u8` (the response as the server sent it), an owning `std.heap.ArenaAllocator`, `deinit()` |
+| `Models` | `models: []const Model`, `request_id`, `attempts`, `body`, an owning arena, `find(name)`, `deinit()` |
 | `Retry` | Policy struct with the vendor defaults, plus `isRetryable`, `retriesStatus`, `isRetryableStatusByDefault`, `backoffMs`, `delayMs`, `nextDelayMs`, `parseRetryAfter` and `disabled`; see Client and transport |
 | `Error`, `InitError`, `Diagnostics`, `errorFromStatus` | See Errors |
 | `hooks.Hooks` | `context` plus `onRequestStart`, `onRetry`, `onRequestEnd` function pointers |
@@ -274,11 +273,16 @@ Rules:
   `instructions` and `criteria` in the documented shape; Noul omits `criteria` when it has none;
   Choice writes one key per enum tag with its description or `null`; Score writes the level array.
   The suite checks the output byte-for-byte against the shared request fixtures.
-- Decoding is `std.json.parseFromSliceLeaky(std.json.Value, arena, body, .{ .allocate = .alloc_always })`
-  followed by a typed decode that reports the field path on failure. The `type` discriminator in
-  each answer is checked against the question's kind, so a mismatched answer is caught rather than
-  silently accepted. Answers the request did not ask for, and fields this version does not know,
-  are ignored, so a newer server never breaks an older client.
+- Decoding is one pass over the response bytes with a pull reader built on `std.json.Scanner`
+  (`json.Reader`), which tracks the path to the value it is reading, so a failure names it. The
+  `type` discriminator in each answer is checked against the question's kind, so a mismatched
+  answer is caught rather than silently accepted. Answers the request did not ask for, and fields
+  this version does not know, are skipped, so a newer server never breaks an older client.
+  Strings and numbers point into the response body unless they contain escapes, in which case the
+  arena owns them; the body itself is kept for the caller as `Result.body`. Keys may arrive in
+  any order, and a key repeated in one object keeps its last value. A body that is not valid
+  JSON, that ends early or that carries data past the document fails with `error.InvalidResponse`.
+  The first problem in document order is the one reported.
 - Score `legend` and `probabilities` arrive as objects keyed `"0"`, `"1"`, ...; they are read by
   key, so no map allocation is needed and a missing level is reported at
   `answers.<id>.probabilities.<n>`.
@@ -360,7 +364,12 @@ Other transport behaviour the suite and live traffic cover:
   body that does not decompress, is `error.InvalidResponse`.
 - Certificate verification uses the system roots. `std.http.Client` reads the clock and the roots
   once, at its first HTTPS request; a long-running client reloads both hourly, so a certificate
-  issued after the client started is accepted and one that has expired is not.
+  issued after the client started is accepted and one that has expired is not. That refresh reads
+  `std.http.Client` fields std does not promise to keep, so it sits behind a build option,
+  `-Dtls-trust-refresh` (`.tls_trust_refresh = false` through `b.dependency`), which is on by
+  default. Built with it off, the package touches only std's supported surface, and a client
+  running for longer than a certificate's validity window verifies against the roots and the
+  clock loaded at its first HTTPS request.
 - `std.http.Client` in Zig 0.16 does not run TLS inside a proxy tunnel, so an HTTPS base URL with
   `https_proxy` set is refused with `error.InvalidRequest` rather than sending the key in
   plaintext. Each attempt also refuses a connection that is not TLS or that is proxied.
@@ -430,7 +439,7 @@ the same shape `std.json.Diagnostics` uses.
 
 ```zig
 pub const Error = error{
-    InvalidRequest, BadRequest, Unauthorized, PermissionDenied, NotFound,
+    InvalidRequest, InvalidOption, BadRequest, Unauthorized, PermissionDenied, NotFound,
     RequestTimeout, Unprocessable, RateLimited, Overloaded, ServerError, UnexpectedStatus,
     ConnectionFailed, TlsFailure, Timeout, InvalidResponse, ResponseTooLarge,
     Canceled, OutOfMemory,
@@ -452,7 +461,7 @@ pub const Diagnostics = struct {
     error_type: ?[]const u8 = null,      // body.detail.error_type, e.g. "authentication_error"
     message: ?[]const u8 = null,         // body.detail.message, or what failed locally
     body: ?[]const u8 = null,            // raw body, capped at max_body_bytes (64 KiB)
-    path: ?[]const u8 = null,            // InvalidRequest / InvalidResponse: "answers.tone.confidence"
+    path: ?[]const u8 = null,            // InvalidRequest / InvalidOption / InvalidResponse: "answers.tone.confidence"
     retry_after_ms: ?u64 = null,
     attempts: u32 = 0,                   // including the first
     cause: ?anyerror = null,             // the underlying transport or body error
@@ -461,7 +470,8 @@ pub const Diagnostics = struct {
 
 | Error | Trigger | Retried by default |
 | --- | --- | --- |
-| `InvalidRequest` | A request failed client-side checks before it was sent: an unencodable value, an invalid per-call option or header, an HTTPS base URL with a proxy configured, an invalid dynamic question | no |
+| `InvalidRequest` | The request could not be encoded: an unencodable value, an empty Noul, a `null` Score level, an invalid dynamic question, a state that is not a string, object or array | no |
+| `InvalidOption` | A per-call option is invalid: an empty model, a timeout above `Client.max_timeout`, a reserved extra header, an HTTPS base URL with a proxy configured. `Diagnostics.path` names the option | no |
 | `BadRequest` | HTTP 400, such as an unknown model | no |
 | `Unauthorized` | HTTP 401, a missing or invalid API key | no |
 | `PermissionDenied` | HTTP 403 | no |
@@ -522,7 +532,7 @@ bookkeeping is wrong.
 | --- | --- | --- |
 | Wire encoding | Each constructor's JSON equals the shared request fixture byte-for-byte; every entry kind (string, object, tuple, `std.json.Value`, `RawJson`) encodes as documented | `std.testing.expectEqualStrings` against `src/testdata/requests/*` |
 | Answer decoding | Every documented response decodes into typed structs; `"0"`-keyed maps land in the fixed-size arrays; unknown fields ignored; a missing probability, an out-of-range probability and a mismatched `type` are `InvalidResponse` with a field path | Fixtures in `src/testdata/responses/`, plus inline bodies |
-| Encoder and decoder | Invalid UTF-8, non-finite floats, bad `number_string`, deep nesting (including inside `RawJson`), an unnamed non-exhaustive enum, a key written outside an object, truncated failure messages | `src/wire_test.zig`, `src/json.zig` tests |
+| Encoder and decoder | Invalid UTF-8, non-finite floats, deep nesting (including inside `RawJson`), an unnamed non-exhaustive enum, a key written outside an object, truncated failure messages, a body that is not JSON, one that ends early, one with trailing data, missing fields and mismatched answer types with their paths | `src/wire_test.zig`, `src/json.zig` tests |
 | Comptime checks | Fewer than two levels, empty enum, non-exhaustive enum, no questions, boolean or number entries through optionals and pointers | Documented in doc comments; Zig has no negative-compilation test in `std.testing`, so these are checked by hand at review |
 | Client | Auth and identification headers, `content-length`, no redirect following, `x-typesafe-retry-count` only on retries, per-call overrides, base-URL and option validation | `MockServer` records request heads and bodies for assertions |
 | Retries | 429 then 200 succeeds and honours `retry-after-ms` (and is actually waited out); 529 retried; 401 and 400 not; the budget stops a further attempt; `max_retries = 0` disables; the retry count header restarts per call; a retryable status with an oversized body is retried | `MockServer` scripted with a status sequence; tests pass a `Retry` with zero backoff |
@@ -615,4 +625,8 @@ Decisions settled while building, with the evidence:
 | No HTTP/2 | `std.http.Client` is HTTP/1.1 only and the API accepts it; bodies are small |
 | Diagnostics as an optional out-parameter rather than a payload-carrying error | Zig errors are integers; `std.json.Diagnostics` is the established shape |
 | A retryable status with an oversized body is retried | A gateway error page larger than `max_response_bytes` is common; the status, not the unreadable body, says whether the server may recover |
+| Responses are decoded in one pass with a pull reader over `std.json.Scanner`, not into a `std.json.Value` tree first | The tree was built on every call and thrown away except for the legend nodes and the `body` the caller may never read; the reader keeps the field paths in the error messages and lets the answer strings point straight into the response body. The typed decode shrinks what a call allocates to the body itself. `Result.body` gives a caller who needs an unknown field the bytes, which is strictly more useful than a decoded copy |
+| `InvalidOption` is separate from `InvalidRequest` | A caller can tell "your data cannot be encoded, look at the state" from "your call is misconfigured, look at the options"; the diagnostics name the option, and neither is retried |
+| The comptime budget margin is per level, not per entry | Measured: with either the per-entry margin or the per-level margin the suite builds; with both absent a 100-level Score fails. One margin, proportional to the work, is enough |
+| The hourly TLS refresh is behind `-Dtls-trust-refresh` | It is the only code that reads `std.http.Client` fields std does not promise to keep (`ca_bundle`, `ca_bundle_lock`, `now`); a consumer that would rather track std can turn it off, and the suite passes in both configurations |
 | `Retry-After` accepts seconds, fractional seconds and the three RFC 9110 date formats, capped at 60 s | RFC 9110 allows all three; the cap matches the JavaScript SDK |

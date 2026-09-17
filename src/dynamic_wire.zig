@@ -141,105 +141,224 @@ pub const Decoded = struct {
 /// `arena`. Every question must have an answer of the matching type.
 pub fn decodeResponse(
     arena: Allocator,
-    dec: *json.Decoder,
+    reader: *json.Reader,
     questions: []const Question,
-    root: std.json.Value,
-) (json.Decoder.Error || Allocator.Error)!Decoded {
-    const top = try dec.object(root);
-    const model = try wire.stringField(dec, top, "model");
+) (json.Reader.Error || Allocator.Error)!Decoded {
+    var model: ?[]const u8 = null;
+    var answers: ?[]const dynamic.Entry = null;
+    var usage: wire.Usage = .{};
 
-    const answers_value = try dec.field(top, "answers");
-    dec.pushKey("answers");
-    const answers_map = try dec.object(answers_value);
-    const entries = try arena.alloc(dynamic.Entry, questions.len);
-    for (questions, entries) |q, *entry| {
-        const value = try dec.field(answers_map, q.id);
-        dec.pushKey(q.id);
-        defer dec.pop();
-        const map = try dec.object(value);
-        try wire.expectType(dec, map, @tagName(q.spec));
-        entry.* = .{
-            .id = try arena.dupe(u8, q.id),
-            .answer = switch (q.spec) {
-                .noul => .{ .noul = .{ .noul = try wire.probabilityField(dec, map, "noul") } },
-                .choice => |choice| .{ .choice = try decodeChoice(arena, dec, choice, map) },
-                .score => |score| .{ .score = try decodeScore(arena, dec, score, map) },
-            },
-        };
+    try reader.beginObject();
+    while (try reader.nextKey()) |key| {
+        if (std.mem.eql(u8, key, "model")) {
+            model = try reader.string();
+        } else if (std.mem.eql(u8, key, "answers")) {
+            answers = try decodeAnswers(arena, reader, questions);
+        } else if (std.mem.eql(u8, key, "usage")) {
+            usage = try wire.decodeUsage(reader);
+        } else {
+            try reader.skipValue();
+        }
     }
-    dec.pop();
-
-    return .{ .model = model, .answers = entries, .usage = try wire.decodeUsage(dec, top) };
+    return .{
+        .model = model orelse return reader.missingField("model"),
+        .answers = answers orelse return reader.missingField("answers"),
+        .usage = usage,
+    };
 }
 
-fn decodeChoice(
+/// Decodes the answers object: one entry per question, by id.
+fn decodeAnswers(
     arena: Allocator,
-    dec: *json.Decoder,
+    reader: *json.Reader,
+    questions: []const Question,
+) (json.Reader.Error || Allocator.Error)![]const dynamic.Entry {
+    const entries = try arena.alloc(dynamic.Entry, questions.len);
+    const found = try arena.alloc(bool, questions.len);
+    @memset(found, false);
+
+    try reader.beginObject();
+    while (try reader.nextKey()) |key| {
+        var matched = false;
+        for (questions, 0..) |q, i| {
+            if (!matched and std.mem.eql(u8, q.id, key)) {
+                entries[i] = .{ .id = try arena.dupe(u8, q.id), .answer = try decodeAnswer(arena, reader, q) };
+                found[i] = true;
+                matched = true;
+            }
+        }
+        if (!matched) try reader.skipValue();
+    }
+    for (questions, 0..) |q, i| {
+        if (!found[i]) return reader.missingField(q.id);
+    }
+    return entries;
+}
+
+fn decodeAnswer(arena: Allocator, reader: *json.Reader, q: Question) (json.Reader.Error || Allocator.Error)!dynamic.Answer {
+    return switch (q.spec) {
+        .noul => .{ .noul = .{ .noul = try decodeNoulAnswer(reader) } },
+        .choice => |choice| .{ .choice = try decodeChoiceAnswer(arena, reader, choice) },
+        .score => |score| .{ .score = try decodeScoreAnswer(arena, reader, score) },
+    };
+}
+
+fn decodeNoulAnswer(reader: *json.Reader) json.Reader.Error!f64 {
+    var value: ?f64 = null;
+    var saw_type = false;
+
+    try reader.beginObject();
+    while (try reader.nextKey()) |key| {
+        if (std.mem.eql(u8, key, "type")) {
+            try wire.expectType(reader, "noul");
+            saw_type = true;
+        } else if (std.mem.eql(u8, key, "noul")) {
+            value = try reader.probability();
+        } else {
+            try reader.skipValue();
+        }
+    }
+    if (!saw_type) return reader.missingField("type");
+    return value orelse return reader.missingField("noul");
+}
+
+fn decodeChoiceAnswer(
+    arena: Allocator,
+    reader: *json.Reader,
     choice: dynamic.Choice,
-    map: std.json.ObjectMap,
-) (json.Decoder.Error || Allocator.Error)!dynamic.ChoiceAnswer {
+) (json.Reader.Error || Allocator.Error)!dynamic.ChoiceAnswer {
     const count = choice.options.len();
     const options = try arena.alloc([]const u8, count);
     for (options, 0..) |*option, index| option.* = try arena.dupe(u8, choice.options.name(index));
-
-    const choice_text = try wire.stringField(dec, map, "choice");
-    const index = for (options, 0..) |option, i| {
-        if (std.mem.eql(u8, option, choice_text)) break i;
-    } else {
-        dec.pushKey("choice");
-        defer dec.pop();
-        return dec.fail("\"{s}\" is not an option of the question", .{choice_text});
-    };
-
-    const probabilities_value = try dec.field(map, "probabilities");
-    dec.pushKey("probabilities");
-    const probabilities_map = try dec.object(probabilities_value);
     const probabilities = try arena.alloc(f64, count);
-    for (probabilities, options) |*p, option| p.* = try wire.probabilityField(dec, probabilities_map, option);
-    dec.pop();
+    @memset(probabilities, 0);
+    const found = try arena.alloc(bool, count);
+    @memset(found, false);
+    var index: ?usize = null;
+    var confidence: ?f64 = null;
+    var saw_type = false;
 
+    try reader.beginObject();
+    while (try reader.nextKey()) |key| {
+        if (std.mem.eql(u8, key, "type")) {
+            try wire.expectType(reader, "choice");
+            saw_type = true;
+        } else if (std.mem.eql(u8, key, "choice")) {
+            const text = try reader.string();
+            index = for (options, 0..) |option, i| {
+                if (std.mem.eql(u8, option, text)) break i;
+            } else return reader.fail("\"{s}\" is not an option of the question", .{text});
+        } else if (std.mem.eql(u8, key, "probabilities")) {
+            try reader.beginObject();
+            while (try reader.nextKey()) |name| {
+                const at = for (options, 0..) |option, i| {
+                    if (std.mem.eql(u8, option, name)) break i;
+                } else {
+                    try reader.skipValue();
+                    continue;
+                };
+                probabilities[at] = try reader.probability();
+                found[at] = true;
+            }
+        } else if (std.mem.eql(u8, key, "confidence")) {
+            confidence = try reader.probability();
+        } else {
+            try reader.skipValue();
+        }
+    }
+    if (!saw_type) return reader.missingField("type");
+    const picked = index orelse return reader.missingField("choice");
+    for (options, 0..) |option, i| {
+        if (!found[i]) return reader.missingField(option);
+    }
     return .{
-        .choice = options[index],
-        .index = index,
+        .choice = options[picked],
+        .index = picked,
         .options = options,
         .probabilities = probabilities,
-        .confidence = try wire.probabilityField(dec, map, "confidence"),
+        .confidence = confidence orelse return reader.missingField("confidence"),
     };
 }
 
-fn decodeScore(
+fn decodeScoreAnswer(
     arena: Allocator,
-    dec: *json.Decoder,
+    reader: *json.Reader,
     score: dynamic.Score,
-    map: std.json.ObjectMap,
-) (json.Decoder.Error || Allocator.Error)!dynamic.ScoreAnswer {
+) (json.Reader.Error || Allocator.Error)!dynamic.ScoreAnswer {
     const count = score.levels.len();
     const probabilities = try arena.alloc(f64, count);
+    @memset(probabilities, 0);
     const legend = try arena.alloc(std.json.Value, count);
+    @memset(legend, .null);
+    const found_probabilities = try arena.alloc(bool, count);
+    @memset(found_probabilities, false);
+    const found_legend = try arena.alloc(bool, count);
+    @memset(found_legend, false);
+    var answer_score: ?f64 = null;
+    var confidence: ?f64 = null;
+    var saw_type = false;
     var key_buffer: [20]u8 = undefined;
 
-    const answer_score = try wire.numberField(dec, map, "score");
-    const confidence = try wire.probabilityField(dec, map, "confidence");
-
-    const probabilities_value = try dec.field(map, "probabilities");
-    dec.pushKey("probabilities");
-    const probabilities_map = try dec.object(probabilities_value);
-    for (probabilities, 0..) |*p, level| {
-        const key = std.fmt.bufPrint(&key_buffer, "{d}", .{level}) catch unreachable;
-        p.* = try wire.probabilityField(dec, probabilities_map, key);
+    try reader.beginObject();
+    while (try reader.nextKey()) |key| {
+        if (std.mem.eql(u8, key, "type")) {
+            try wire.expectType(reader, "score");
+            saw_type = true;
+        } else if (std.mem.eql(u8, key, "score")) {
+            answer_score = try reader.number();
+        } else if (std.mem.eql(u8, key, "confidence")) {
+            confidence = try reader.probability();
+        } else if (std.mem.eql(u8, key, "probabilities") or std.mem.eql(u8, key, "legend")) {
+            const is_legend = std.mem.eql(u8, key, "legend");
+            try reader.beginObject();
+            while (try reader.nextKey()) |name| {
+                const level = std.fmt.parseInt(usize, name, 10) catch {
+                    try reader.skipValue();
+                    continue;
+                };
+                if (level >= count) {
+                    try reader.skipValue();
+                    continue;
+                }
+                if (is_legend) {
+                    legend[level] = try reader.value();
+                    found_legend[level] = true;
+                } else {
+                    probabilities[level] = try reader.probability();
+                    found_probabilities[level] = true;
+                }
+            }
+        } else {
+            try reader.skipValue();
+        }
     }
-    dec.pop();
-
-    const legend_value = try dec.field(map, "legend");
-    dec.pushKey("legend");
-    const legend_map = try dec.object(legend_value);
-    for (legend, 0..) |*entry, level| {
+    if (!saw_type) return reader.missingField("type");
+    // The maps have been closed by now, so their name is put back for the
+    // path the failure is reported at.
+    var level: usize = 0;
+    while (level < count) : (level += 1) {
         const key = std.fmt.bufPrint(&key_buffer, "{d}", .{level}) catch unreachable;
-        entry.* = try dec.field(legend_map, key);
+        if (!found_probabilities[level]) {
+            reader.pushKey("probabilities");
+            defer reader.pop();
+            return reader.missingField(key);
+        }
     }
-    dec.pop();
-
-    return .{ .score = answer_score, .probabilities = probabilities, .legend = legend, .confidence = confidence };
+    level = 0;
+    while (level < count) : (level += 1) {
+        const key = std.fmt.bufPrint(&key_buffer, "{d}", .{level}) catch unreachable;
+        if (!found_legend[level]) {
+            reader.pushKey("legend");
+            defer reader.pop();
+            return reader.missingField(key);
+        }
+    }
+    return .{
+        .score = answer_score orelse return reader.missingField("score"),
+        .probabilities = probabilities,
+        .legend = legend,
+        .confidence = confidence orelse return reader.missingField("confidence"),
+    };
 }
 
 test "encodeRequest matches the typed encoder" {
@@ -332,9 +451,9 @@ test "decodeResponse decodes answers in question order" {
         .choice("department", "Team?", .{ .names = &.{ "billing", "technical", "sales" } }),
         .score("frustration", "Frustration?", .{ .text = &.{ "Calm", "Frustrated", "Very angry" } }),
     };
-    const root = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), @embedFile("testdata/responses/mixed.json"), .{});
-    var dec: json.Decoder = .{};
-    const decoded = try decodeResponse(arena.allocator(), &dec, &questions, root);
+    var reader: json.Reader = .init(arena.allocator(), @embedFile("testdata/responses/mixed.json"));
+    defer reader.deinit();
+    const decoded = try decodeResponse(arena.allocator(), &reader, &questions);
 
     try std.testing.expectEqualStrings("is_urgent", decoded.answers[0].id);
     try std.testing.expectEqual(0.92, decoded.answers[0].answer.noul.noul);
@@ -352,6 +471,8 @@ test "decodeResponse decodes answers in question order" {
     try std.testing.expectEqualStrings("Calm", frustration.legend[0].string);
 
     const unknown = [_]Question{.choice("department", "Team?", .{ .names = &.{ "billing", "sales" } })};
-    try std.testing.expectError(error.InvalidResponse, decodeResponse(arena.allocator(), &dec, &unknown, root));
-    try std.testing.expectEqualStrings("answers.department.choice", dec.failure.path());
+    var retry: json.Reader = .init(arena.allocator(), @embedFile("testdata/responses/mixed.json"));
+    defer retry.deinit();
+    try std.testing.expectError(error.InvalidResponse, decodeResponse(arena.allocator(), &retry, &unknown));
+    try std.testing.expectEqualStrings("answers.department.choice", retry.failure.path());
 }

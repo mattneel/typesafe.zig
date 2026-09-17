@@ -83,7 +83,7 @@ test "ask sends the request and decodes typed answers" {
     try testing.expectEqual([3]f64{ 0, 0.96, 0.04 }, result.answers.frustration.probabilities);
     try testing.expectEqual(1, result.answers.frustration.expectedLevel());
     try testing.expectEqualStrings("Frustrated", result.answers.frustration.legend[1].string);
-    try testing.expectEqualStrings("jev-1.13.0", result.raw.object.get("model").?.string);
+    try testing.expect(std.mem.find(u8, result.body, "\"model\":\"jev-1.13.0\"") != null);
 
     try testing.expectEqual(1, h.server.requestCount());
     const request = h.server.request(0);

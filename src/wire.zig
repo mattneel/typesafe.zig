@@ -2,6 +2,9 @@
 //! bodies.
 
 const std = @import("std");
+/// The comptime branch budget the decoders start from, matching the
+/// constructors in `question.zig`: an answer struct is built field by field.
+const eval_branch_quota_base = 1000;
 const Allocator = std.mem.Allocator;
 const json = @import("json.zig");
 const question = @import("question.zig");
@@ -89,105 +92,242 @@ pub fn Decoded(comptime Questions: type) type {
 ///
 /// Every question must have an answer of the matching type. Answers the
 /// request did not ask for, and fields this version does not know, are
-/// ignored, so a newer server never breaks an older client.
-pub fn decodeAsk(comptime Questions: type, dec: *json.Decoder, root: std.json.Value) json.Decoder.Error!Decoded(Questions) {
-    const top = try dec.object(root);
-    const model = try stringField(dec, top, "model");
+/// ignored, so a newer server never breaks an older client. Keys may arrive in
+/// any order; a key repeated in the same object takes its last value.
+pub fn decodeAsk(comptime Questions: type, reader: *json.Reader) json.Reader.Error!Decoded(Questions) {
+    var model: ?[]const u8 = null;
+    var answers: ?question.Answers(Questions) = null;
+    var usage: Usage = .{};
 
-    const answers_value = try dec.field(top, "answers");
-    dec.pushKey("answers");
-    const answers_map = try dec.object(answers_value);
-    var answers: question.Answers(Questions) = undefined;
-    inline for (@typeInfo(Questions).@"struct".fields) |field| {
-        const value = try dec.field(answers_map, field.name);
-        dec.pushKey(field.name);
-        @field(answers, field.name) = try decodeAnswer(field.type, dec, value);
-        dec.pop();
+    try reader.beginObject();
+    while (try reader.nextKey()) |key| {
+        if (std.mem.eql(u8, key, "model")) {
+            model = try reader.string();
+        } else if (std.mem.eql(u8, key, "answers")) {
+            answers = try decodeAnswers(Questions, reader);
+        } else if (std.mem.eql(u8, key, "usage")) {
+            usage = try decodeUsage(reader);
+        } else {
+            try reader.skipValue();
+        }
     }
-    dec.pop();
-
     return .{
-        .model = model,
-        .answers = answers,
-        .usage = try decodeUsage(dec, top),
+        .model = model orelse return reader.missingField("model"),
+        .answers = answers orelse return reader.missingField("answers"),
+        .usage = usage,
     };
 }
 
-/// Decodes one answer for question type `Q`, checking the wire `type`.
-fn decodeAnswer(comptime Q: type, dec: *json.Decoder, value: std.json.Value) json.Decoder.Error!Q.Answer {
-    const map = try dec.object(value);
-    try expectType(dec, map, @tagName(Q.kind));
-    return switch (Q.kind) {
-        .noul => .{ .noul = try probabilityField(dec, map, "noul") },
-        .choice => decodeChoice(Q.Answer, dec, map),
-        .score => decodeScore(Q.Answer, dec, map),
-    };
-}
+/// Decodes the `answers` object: one entry per question field, by name.
+fn decodeAnswers(comptime Questions: type, reader: *json.Reader) json.Reader.Error!question.Answers(Questions) {
+    const fields = @typeInfo(Questions).@"struct".fields;
+    var found: [fields.len]bool = @splat(false);
+    var answers: question.Answers(Questions) = undefined;
 
-pub fn expectType(dec: *json.Decoder, map: std.json.ObjectMap, expected: []const u8) json.Decoder.Error!void {
-    const actual = try stringField(dec, map, "type");
-    if (!std.mem.eql(u8, actual, expected)) {
-        dec.pushKey("type");
-        defer dec.pop();
-        return dec.fail("expected a {s} answer, got \"{s}\"", .{ expected, actual });
+    try reader.beginObject();
+    while (try reader.nextKey()) |key| {
+        var matched = false;
+        inline for (fields, 0..) |field, i| {
+            if (!matched and std.mem.eql(u8, field.name, key)) {
+                @field(answers, field.name) = try decodeAnswer(field.type, reader);
+                found[i] = true;
+                matched = true;
+            }
+        }
+        if (!matched) try reader.skipValue();
     }
+    inline for (fields, 0..) |field, i| {
+        if (!found[i]) return reader.missingField(field.name);
+    }
+    return answers;
 }
 
-fn decodeChoice(comptime Answer: type, dec: *json.Decoder, map: std.json.ObjectMap) json.Decoder.Error!Answer {
+/// Decodes one answer, checking the wire `type` against the question's kind.
+fn decodeAnswer(comptime Q: type, reader: *json.Reader) json.Reader.Error!Q.Answer {
+    return switch (Q.kind) {
+        .noul => .{ .noul = try decodeNoulAnswer(reader) },
+        .choice => try decodeChoiceAnswer(Q.Answer, reader),
+        .score => try decodeScoreAnswer(Q.Answer, reader),
+    };
+}
+
+fn decodeNoulAnswer(reader: *json.Reader) json.Reader.Error!f64 {
+    var value: ?f64 = null;
+    var saw_type = false;
+
+    try reader.beginObject();
+    while (try reader.nextKey()) |key| {
+        if (std.mem.eql(u8, key, "type")) {
+            try expectType(reader, "noul");
+            saw_type = true;
+        } else if (std.mem.eql(u8, key, "noul")) {
+            value = try reader.probability();
+        } else {
+            try reader.skipValue();
+        }
+    }
+    if (!saw_type) return reader.missingField("type");
+    return value orelse return reader.missingField("noul");
+}
+
+fn decodeChoiceAnswer(comptime Answer: type, reader: *json.Reader) json.Reader.Error!Answer {
     const Option = @FieldType(Answer, "choice");
     const option_fields = @typeInfo(Option).@"enum".fields;
-    @setEvalBranchQuota(1000 + 16 * option_fields.len);
-    const choice_text = try stringField(dec, map, "choice");
-    const choice: Option = find: {
-        inline for (option_fields) |field| {
-            if (std.mem.eql(u8, field.name, choice_text)) break :find @field(Option, field.name);
+    @setEvalBranchQuota(eval_branch_quota_base + 16 * option_fields.len);
+    var choice: ?Option = null;
+    var probabilities: ?Answer.Probabilities = null;
+    var confidence: ?f64 = null;
+    var saw_type = false;
+
+    try reader.beginObject();
+    while (try reader.nextKey()) |key| {
+        if (std.mem.eql(u8, key, "type")) {
+            try expectType(reader, "choice");
+            saw_type = true;
+        } else if (std.mem.eql(u8, key, "choice")) {
+            const text = try reader.string();
+            inline for (option_fields) |field| {
+                if (std.mem.eql(u8, field.name, text)) {
+                    choice = @field(Option, field.name);
+                    break;
+                }
+            }
+            if (choice == null) return reader.fail("\"{s}\" is not an option of the question", .{text});
+        } else if (std.mem.eql(u8, key, "probabilities")) {
+            probabilities = try decodeChoiceProbabilities(Answer, reader);
+        } else if (std.mem.eql(u8, key, "confidence")) {
+            confidence = try reader.probability();
+        } else {
+            try reader.skipValue();
         }
-        dec.pushKey("choice");
-        defer dec.pop();
-        return dec.fail("\"{s}\" is not an option of the question", .{choice_text});
-    };
-
-    const probabilities_value = try dec.field(map, "probabilities");
-    dec.pushKey("probabilities");
-    const probabilities_map = try dec.object(probabilities_value);
-    var probabilities: Answer.Probabilities = undefined;
-    inline for (option_fields) |field| {
-        @field(probabilities, field.name) = try probabilityField(dec, probabilities_map, field.name);
     }
-    dec.pop();
-
+    if (!saw_type) return reader.missingField("type");
     return .{
-        .choice = choice,
-        .probabilities = probabilities,
-        .confidence = try probabilityField(dec, map, "confidence"),
+        .choice = choice orelse return reader.missingField("choice"),
+        .probabilities = probabilities orelse return reader.missingField("probabilities"),
+        .confidence = confidence orelse return reader.missingField("confidence"),
     };
 }
 
-fn decodeScore(comptime Answer: type, dec: *json.Decoder, map: std.json.ObjectMap) json.Decoder.Error!Answer {
+/// Decodes an option-keyed probability object; every option must be present.
+fn decodeChoiceProbabilities(comptime Answer: type, reader: *json.Reader) json.Reader.Error!Answer.Probabilities {
+    const Option = @FieldType(Answer, "choice");
+    const option_fields = @typeInfo(Option).@"enum".fields;
+    @setEvalBranchQuota(eval_branch_quota_base + 16 * option_fields.len);
+    var found: [option_fields.len]bool = @splat(false);
+    var probabilities: Answer.Probabilities = undefined;
+
+    try reader.beginObject();
+    while (try reader.nextKey()) |key| {
+        var matched = false;
+        inline for (option_fields, 0..) |field, i| {
+            if (!matched and std.mem.eql(u8, field.name, key)) {
+                @field(probabilities, field.name) = try reader.probability();
+                found[i] = true;
+                matched = true;
+            }
+        }
+        if (!matched) try reader.skipValue();
+    }
+    inline for (option_fields, 0..) |field, i| {
+        if (!found[i]) return reader.missingField(field.name);
+    }
+    return probabilities;
+}
+
+fn decodeScoreAnswer(comptime Answer: type, reader: *json.Reader) json.Reader.Error!Answer {
     const level_count = @typeInfo(@FieldType(Answer, "probabilities")).array.len;
+    @setEvalBranchQuota(eval_branch_quota_base + 32 * level_count);
     var answer: Answer = .{
-        .score = try numberField(dec, map, "score"),
+        .score = 0,
         .probabilities = undefined,
-        .confidence = try probabilityField(dec, map, "confidence"),
+        .confidence = 0,
     };
+    var probabilities_found: [level_count]bool = @splat(false);
+    var legend_found: [level_count]bool = @splat(false);
+    var saw_score = false;
+    var saw_confidence = false;
+    var saw_type = false;
 
-    const probabilities_value = try dec.field(map, "probabilities");
-    dec.pushKey("probabilities");
-    const probabilities_map = try dec.object(probabilities_value);
-    inline for (0..level_count) |level| {
-        answer.probabilities[level] = try probabilityField(dec, probabilities_map, levelKey(level));
+    try reader.beginObject();
+    while (try reader.nextKey()) |key| {
+        if (std.mem.eql(u8, key, "type")) {
+            try expectType(reader, "score");
+            saw_type = true;
+        } else if (std.mem.eql(u8, key, "score")) {
+            answer.score = try reader.number();
+            saw_score = true;
+        } else if (std.mem.eql(u8, key, "probabilities")) {
+            try decodeLevelValues(reader, f64, &answer.probabilities, &probabilities_found, probabilityValue);
+        } else if (std.mem.eql(u8, key, "legend")) {
+            try decodeLevelValues(reader, std.json.Value, &answer.legend, &legend_found, legendValue);
+        } else if (std.mem.eql(u8, key, "confidence")) {
+            answer.confidence = try reader.probability();
+            saw_confidence = true;
+        } else {
+            try reader.skipValue();
+        }
     }
-    dec.pop();
-
-    const legend_value = try dec.field(map, "legend");
-    dec.pushKey("legend");
-    const legend_map = try dec.object(legend_value);
+    if (!saw_type) return reader.missingField("type");
+    if (!saw_score) return reader.missingField("score");
+    // The maps have been closed by now, so their name is put back for the
+    // path the failure is reported at.
     inline for (0..level_count) |level| {
-        answer.legend[level] = try dec.field(legend_map, levelKey(level));
+        if (!probabilities_found[level]) {
+            reader.pushKey("probabilities");
+            defer reader.pop();
+            return reader.missingField(levelKey(level));
+        }
     }
-    dec.pop();
-
+    inline for (0..level_count) |level| {
+        if (!legend_found[level]) {
+            reader.pushKey("legend");
+            defer reader.pop();
+            return reader.missingField(levelKey(level));
+        }
+    }
+    if (!saw_confidence) return reader.missingField("confidence");
     return answer;
+}
+
+/// Decodes a level-keyed object (`"0"`, `"1"`, ...) into `values`. Keys that
+/// are not level indexes are ignored, as are keys past the end.
+fn decodeLevelValues(
+    reader: *json.Reader,
+    comptime T: type,
+    values: []T,
+    found: []bool,
+    comptime read: fn (*json.Reader) json.Reader.Error!T,
+) json.Reader.Error!void {
+    try reader.beginObject();
+    while (try reader.nextKey()) |key| {
+        const level = std.fmt.parseInt(usize, key, 10) catch {
+            try reader.skipValue();
+            continue;
+        };
+        if (level >= values.len) {
+            try reader.skipValue();
+            continue;
+        }
+        values[level] = try read(reader);
+        found[level] = true;
+    }
+}
+
+fn probabilityValue(reader: *json.Reader) json.Reader.Error!f64 {
+    return reader.probability();
+}
+
+fn legendValue(reader: *json.Reader) json.Reader.Error!std.json.Value {
+    return reader.value();
+}
+
+/// Reads the `type` member and checks it against `expected`.
+pub fn expectType(reader: *json.Reader, expected: []const u8) json.Reader.Error!void {
+    const actual = try reader.string();
+    if (!std.mem.eql(u8, actual, expected)) {
+        return reader.fail("expected a {s} answer, got \"{s}\"", .{ expected, actual });
+    }
 }
 
 /// The wire key of a Score level: `"0"`, `"1"`, ...
@@ -196,73 +336,65 @@ pub fn levelKey(comptime level: usize) []const u8 {
 }
 
 /// Decodes the optional `usage` member of a response object.
-pub fn decodeUsage(dec: *json.Decoder, top: std.json.ObjectMap) json.Decoder.Error!Usage {
-    const value = top.get("usage") orelse return .{};
-    dec.pushKey("usage");
-    defer dec.pop();
-    if (value == .null) return .{};
-    const map = try dec.object(value);
-    return .{
-        .input_tokens = try optionalCountField(dec, map, "input_tokens"),
-        .output_tokens = try optionalCountField(dec, map, "output_tokens"),
-    };
-}
-
-/// Decodes a `GET /v1/models` response. Strings in the result point into
-/// `root`; the slice is allocated with `arena`.
-pub fn decodeModels(
-    arena: Allocator,
-    dec: *json.Decoder,
-    root: std.json.Value,
-) (json.Decoder.Error || error{OutOfMemory})![]const Model {
-    const top = try dec.object(root);
-    const list_value = try dec.field(top, "models");
-    dec.pushKey("models");
-    defer dec.pop();
-    const items = switch (list_value) {
-        .array => |array| array.items,
-        else => return dec.fail("expected an array", .{}),
-    };
-    const models = try arena.alloc(Model, items.len);
-    for (items, models, 0..) |item, *model, index| {
-        dec.pushIndex(index);
-        defer dec.pop();
-        const map = try dec.object(item);
-        model.* = .{
-            .name = try stringField(dec, map, "name"),
-            .description = try stringField(dec, map, "description"),
-            .release_date = try stringField(dec, map, "release_date"),
-        };
+pub fn decodeUsage(reader: *json.Reader) json.Reader.Error!Usage {
+    var usage: Usage = .{};
+    try reader.beginObject();
+    while (try reader.nextKey()) |key| {
+        if (std.mem.eql(u8, key, "input_tokens")) {
+            usage.input_tokens = try reader.optionalCount();
+        } else if (std.mem.eql(u8, key, "output_tokens")) {
+            usage.output_tokens = try reader.optionalCount();
+        } else {
+            try reader.skipValue();
+        }
     }
-    return models;
+    return usage;
 }
 
-pub fn stringField(dec: *json.Decoder, map: std.json.ObjectMap, name: []const u8) json.Decoder.Error![]const u8 {
-    const value = try dec.field(map, name);
-    dec.pushKey(name);
-    defer dec.pop();
-    return dec.string(value);
+/// Decodes a `GET /v1/models` response. Strings in the result point into the
+/// response body or are allocated with `arena`.
+pub fn decodeModels(arena: Allocator, reader: *json.Reader) (json.Reader.Error || Allocator.Error)![]const Model {
+    var models: ?[]const Model = null;
+
+    try reader.beginObject();
+    while (try reader.nextKey()) |key| {
+        if (std.mem.eql(u8, key, "models")) {
+            var list: std.ArrayList(Model) = .empty;
+            try reader.beginArray();
+            var index: usize = 0;
+            while (try reader.nextElement(index)) : (index += 1) {
+                try list.append(arena, try decodeModel(reader));
+            }
+            models = try list.toOwnedSlice(arena);
+        } else {
+            try reader.skipValue();
+        }
+    }
+    return models orelse return reader.missingField("models");
 }
 
-pub fn numberField(dec: *json.Decoder, map: std.json.ObjectMap, name: []const u8) json.Decoder.Error!f64 {
-    const value = try dec.field(map, name);
-    dec.pushKey(name);
-    defer dec.pop();
-    return dec.number(value);
-}
+fn decodeModel(reader: *json.Reader) json.Reader.Error!Model {
+    var name: ?[]const u8 = null;
+    var description: ?[]const u8 = null;
+    var release_date: ?[]const u8 = null;
 
-pub fn probabilityField(dec: *json.Decoder, map: std.json.ObjectMap, name: []const u8) json.Decoder.Error!f64 {
-    const value = try dec.field(map, name);
-    dec.pushKey(name);
-    defer dec.pop();
-    return dec.probability(value);
-}
-
-fn optionalCountField(dec: *json.Decoder, map: std.json.ObjectMap, name: []const u8) json.Decoder.Error!?u64 {
-    const value = map.get(name) orelse return null;
-    dec.pushKey(name);
-    defer dec.pop();
-    return dec.optionalCount(value);
+    try reader.beginObject();
+    while (try reader.nextKey()) |key| {
+        if (std.mem.eql(u8, key, "name")) {
+            name = try reader.string();
+        } else if (std.mem.eql(u8, key, "description")) {
+            description = try reader.string();
+        } else if (std.mem.eql(u8, key, "release_date")) {
+            release_date = try reader.string();
+        } else {
+            try reader.skipValue();
+        }
+    }
+    return .{
+        .name = name orelse return reader.missingField("name"),
+        .description = description orelse return reader.missingField("description"),
+        .release_date = release_date orelse return reader.missingField("release_date"),
+    };
 }
 
 /// What an error response body says.
@@ -553,10 +685,11 @@ test "encodeAsk rejects state that is not a string, object or array" {
 
 test "decodeAsk decodes the mixed response fixture" {
     const gpa = std.testing.allocator;
-    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, @embedFile("testdata/responses/mixed.json"), .{});
-    defer parsed.deinit();
-    var dec: json.Decoder = .{};
-    const decoded = try decodeAsk(@TypeOf(mixed_questions), &dec, parsed.value);
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    var reader: json.Reader = .init(arena.allocator(), @embedFile("testdata/responses/mixed.json"));
+    defer reader.deinit();
+    const decoded = try decodeAsk(@TypeOf(mixed_questions), &reader);
     try std.testing.expectEqualStrings("jev-1.13.0", decoded.model);
     try std.testing.expectEqual(0.92, decoded.answers.is_urgent.noul);
     try std.testing.expectEqual(Team.technical, decoded.answers.department.choice);
@@ -577,10 +710,11 @@ test "decodeAsk accepts integer probabilities, extra fields, and missing usage" 
         .tone = question.choice(Tone, "Tone?", .{}),
         .urgency = question.score("Urgency?", .{ "Can wait", "This week", "Today" }),
     };
-    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, @embedFile("testdata/responses/integer_probabilities.json"), .{});
-    defer parsed.deinit();
-    var dec: json.Decoder = .{};
-    const decoded = try decodeAsk(@TypeOf(questions), &dec, parsed.value);
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    var reader: json.Reader = .init(arena.allocator(), @embedFile("testdata/responses/integer_probabilities.json"));
+    defer reader.deinit();
+    const decoded = try decodeAsk(@TypeOf(questions), &reader);
     try std.testing.expectEqual(1, decoded.answers.is_spam.noul);
     try std.testing.expectEqual(Tone.calm, decoded.answers.tone.choice);
     try std.testing.expectEqual(2, decoded.answers.urgency.score);
@@ -591,19 +725,19 @@ test "decodeAsk accepts integer probabilities, extra fields, and missing usage" 
         .department = question.choice(Team, "Team?", .{}),
         .frustration = question.score("Frustration?", .{ "Calm", "Frustrated", "Very angry" }),
     };
-    var extra_parsed = try std.json.parseFromSlice(std.json.Value, gpa, @embedFile("testdata/responses/extra_fields.json"), .{});
-    defer extra_parsed.deinit();
-    const extra_decoded = try decodeAsk(@TypeOf(extra), &dec, extra_parsed.value);
+    var extra_reader: json.Reader = .init(arena.allocator(), @embedFile("testdata/responses/extra_fields.json"));
+    defer extra_reader.deinit();
+    const extra_decoded = try decodeAsk(@TypeOf(extra), &extra_reader);
     try std.testing.expectEqual(0.92, extra_decoded.answers.is_urgent.noul);
 
     const unknown = .{ .is_urgent = question.noul("Urgent?", .{}) };
-    var unknown_parsed = try std.json.parseFromSlice(std.json.Value, gpa, @embedFile("testdata/responses/unknown_type.json"), .{});
-    defer unknown_parsed.deinit();
-    _ = try decodeAsk(@TypeOf(unknown), &dec, unknown_parsed.value);
+    var unknown_reader: json.Reader = .init(arena.allocator(), @embedFile("testdata/responses/unknown_type.json"));
+    defer unknown_reader.deinit();
+    _ = try decodeAsk(@TypeOf(unknown), &unknown_reader);
 
-    var missing_parsed = try std.json.parseFromSlice(std.json.Value, gpa, @embedFile("testdata/responses/missing_usage.json"), .{});
-    defer missing_parsed.deinit();
-    const missing = try decodeAsk(@TypeOf(unknown), &dec, missing_parsed.value);
+    var missing_reader: json.Reader = .init(arena.allocator(), @embedFile("testdata/responses/missing_usage.json"));
+    defer missing_reader.deinit();
+    const missing = try decodeAsk(@TypeOf(unknown), &missing_reader);
     try std.testing.expectEqual(null, missing.usage.input_tokens);
 }
 
@@ -615,23 +749,24 @@ test "decodeAsk decodes structured legends" {
         .severity = question.score(.{ "Rate", "severity" }, .{ .{ .level = "low" }, .{"medium"}, "high" }),
         .refund = question.noul(null, .{ .yes = .{ .asks_for = "refund" }, .no = null }),
     };
-    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, @embedFile("testdata/responses/recorded_structured.json"), .{});
-    defer parsed.deinit();
-    var dec: json.Decoder = .{};
-    const decoded = try decodeAsk(@TypeOf(questions), &dec, parsed.value);
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    var reader: json.Reader = .init(arena.allocator(), @embedFile("testdata/responses/recorded_structured.json"));
+    defer reader.deinit();
+    const decoded = try decodeAsk(@TypeOf(questions), &reader);
     try std.testing.expectEqualStrings("low", decoded.answers.severity.legend[0].object.get("level").?.string);
     try std.testing.expectEqualStrings("medium", decoded.answers.severity.legend[1].array.items[0].string);
     try std.testing.expectEqual(0, decoded.answers.severity.maxLevel());
 }
 
 fn expectDecodeFailure(comptime Questions: type, body: []const u8, path: []const u8, message: []const u8) !void {
-    const gpa = std.testing.allocator;
-    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, body, .{});
-    defer parsed.deinit();
-    var dec: json.Decoder = .{};
-    try std.testing.expectError(error.InvalidResponse, decodeAsk(Questions, &dec, parsed.value));
-    try std.testing.expectEqualStrings(path, dec.failure.path());
-    try std.testing.expectEqualStrings(message, dec.failure.message());
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var reader: json.Reader = .init(arena.allocator(), body);
+    defer reader.deinit();
+    try std.testing.expectError(error.InvalidResponse, decodeAsk(Questions, &reader));
+    try std.testing.expectEqualStrings(path, reader.failure.path());
+    try std.testing.expectEqualStrings(message, reader.failure.message());
 }
 
 test "decodeAsk reports what is wrong and where" {
@@ -643,7 +778,10 @@ test "decodeAsk reports what is wrong and where" {
         \\"frustration":{"type":"score","score":1,"legend":{"0":"a","1":"b","2":"c"},"probabilities":{"0":0.1,"1":0.8,"2":0.1},"confidence":0.5}
     ;
     try expectDecodeFailure(Q, "[]", "", "expected an object, got an array");
-    try expectDecodeFailure(Q, "{\"answers\":{}}", "model", "missing required field");
+    // The first problem in document order is the one reported: `answers` is
+    // read before `model` is known to be missing.
+    try expectDecodeFailure(Q, "{\"answers\":{}}", "answers.department", "missing required field");
+    try expectDecodeFailure(Q, "{}", "model", "missing required field");
     try expectDecodeFailure(Q, "{\"model\":\"m\",\"answers\":{}}", "answers.department", "missing required field");
     try expectDecodeFailure(Q, "{\"model\":\"m\",\"answers\":{\"department\":{\"type\":\"noul\",\"noul\":1}}}", "answers.department.type", "expected a choice answer, got \"noul\"");
     try expectDecodeFailure(Q, "{\"model\":\"m\",\"answers\":{\"department\":{\"type\":\"choice\",\"choice\":\"legal\"}}}", "answers.department.choice", "\"legal\" is not an option of the question");
@@ -658,18 +796,17 @@ test "decodeModels" {
     const gpa = std.testing.allocator;
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
-    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, @embedFile("testdata/responses/recorded_models.json"), .{});
-    defer parsed.deinit();
-    var dec: json.Decoder = .{};
-    const models = try decodeModels(arena.allocator(), &dec, parsed.value);
+    var reader: json.Reader = .init(arena.allocator(), @embedFile("testdata/responses/recorded_models.json"));
+    defer reader.deinit();
+    const models = try decodeModels(arena.allocator(), &reader);
     try std.testing.expectEqual(2, models.len);
     try std.testing.expectEqualStrings("jev-latest", models[0].name);
     try std.testing.expectEqualStrings("2026-09-10T18:39:06.057655+00:00", models[1].release_date);
 
-    var bad = try std.json.parseFromSlice(std.json.Value, gpa, "{\"models\":[{\"name\":\"x\",\"description\":\"y\"}]}", .{});
+    var bad: json.Reader = .init(arena.allocator(), "{\"models\":[{\"name\":\"x\",\"description\":\"y\"}]}");
     defer bad.deinit();
-    try std.testing.expectError(error.InvalidResponse, decodeModels(arena.allocator(), &dec, bad.value));
-    try std.testing.expectEqualStrings("models[0].release_date", dec.failure.path());
+    try std.testing.expectError(error.InvalidResponse, decodeModels(arena.allocator(), &bad));
+    try std.testing.expectEqualStrings("models[0].release_date", bad.failure.path());
 }
 
 test parseErrorBody {
@@ -721,10 +858,11 @@ test "encodeAnswers round-trips through decodeAsk" {
     }, .{ .model = "jev-1.13.0" });
     defer gpa.free(body);
 
-    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, body, .{});
-    defer parsed.deinit();
-    var dec: json.Decoder = .{};
-    const decoded = try decodeAsk(@TypeOf(mixed_questions), &dec, parsed.value);
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    var reader: json.Reader = .init(arena.allocator(), body);
+    defer reader.deinit();
+    const decoded = try decodeAsk(@TypeOf(mixed_questions), &reader);
     try std.testing.expectEqual(Team.billing, decoded.answers.department.choice);
     try std.testing.expectEqual(0.25, decoded.answers.is_urgent.noul);
     try std.testing.expectEqualStrings("Frustrated but civil", decoded.answers.frustration.legend[1].string);

@@ -51,10 +51,12 @@ fn encodeDynamic(allocator: std.mem.Allocator) !void {
 fn decodeBoth(allocator: std.mem.Allocator, body: []const u8) !void {
     var arena: std.heap.ArenaAllocator = .init(allocator);
     defer arena.deinit();
-    const root = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), body, .{});
-    var dec: json.Decoder = .{};
-    _ = try wire.decodeAsk(@TypeOf(questions), &dec, root);
-    _ = try dynamic_wire.decodeResponse(arena.allocator(), &dec, &dynamic_questions, root);
+    var reader: json.Reader = .init(arena.allocator(), body);
+    defer reader.deinit();
+    _ = try wire.decodeAsk(@TypeOf(questions), &reader);
+    reader.deinit();
+    reader = .init(arena.allocator(), body);
+    _ = try dynamic_wire.decodeResponse(arena.allocator(), &reader, &dynamic_questions);
 }
 
 fn parseError(allocator: std.mem.Allocator) !void {
