@@ -1,0 +1,15 @@
+{
+  "model": "jev-latest",
+  "answers": {
+    "is_urgent": {
+      "type": "noul",
+      "noul": 0.92
+    },
+    "logo_region": {
+      "type": "bounding_box",
+      "box": [12, 40, 128, 96],
+      "confidence": 0.71
+    }
+  },
+  "usage": { "input_tokens": 312, "output_tokens": 48 }
+}

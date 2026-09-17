@@ -1,0 +1,68 @@
+name: Live API
+
+on:
+  schedule:
+    # Daily at 06:23 UTC (off the hour to avoid the top-of-hour scheduling backlog).
+    - cron: "23 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  ZIG_VERSION: "0.16.0"
+
+jobs:
+  # Secrets cannot be used in a job-level `if`, so a small job checks for the key and the live job
+  # is skipped (not failed) when it is absent. The repository guard keeps forks, which have no
+  # secret and must not spend anyone's API quota, from running this at all.
+  api-key:
+    name: Check for TYPESAFE_API_KEY
+    if: github.repository == 'mattneel/typesafe.zig'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      present: ${{ steps.check.outputs.present }}
+    steps:
+      - id: check
+        env:
+          TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
+        run: |
+          if [ -n "$TYPESAFE_API_KEY" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Live tests skipped::The TYPESAFE_API_KEY repository secret is not set."
+          fi
+
+  live:
+    name: Live tests
+    needs: api-key
+    if: needs.api-key.outputs.present == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Live tests
+        env:
+          TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
+        run: zig build test-live --test-timeout 120s --summary all
+
+      - name: Run the examples
+        env:
+          TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
+        run: |
+          for example in route_ticket structured batch dynamic list_models; do
+            echo "::group::$example"
+            zig build run -Dexample="$example"
+            echo "::endgroup::"
+          done

@@ -1,0 +1,42 @@
+{
+  "answers": {
+    "refund": {
+      "noul": 0.88,
+      "type": "noul"
+    },
+    "route": {
+      "choice": "billing",
+      "confidence": 1.0,
+      "probabilities": {
+        "billing": 1.0,
+        "other": 0.0,
+        "technical": 0.0
+      },
+      "type": "choice"
+    },
+    "severity": {
+      "confidence": 0.34,
+      "legend": {
+        "0": {
+          "level": "low"
+        },
+        "1": [
+          "medium"
+        ],
+        "2": "high"
+      },
+      "probabilities": {
+        "0": 0.57,
+        "1": 0.42,
+        "2": 0.01
+      },
+      "score": 0.44,
+      "type": "score"
+    }
+  },
+  "model": "jev-1.13.0",
+  "usage": {
+    "input_tokens": 443,
+    "output_tokens": 68
+  }
+}

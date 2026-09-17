@@ -1,0 +1,9 @@
+{
+  "model": "jev-latest",
+  "answers": {
+    "is_urgent": {
+      "type": "noul",
+      "noul": 0.92
+    }
+  }
+}

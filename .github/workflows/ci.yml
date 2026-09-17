@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same PR or branch cancels the run in progress. On master every commit keeps
+# its own result so a red commit can always be pinpointed.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
+permissions:
+  contents: read
+
+env:
+  # The minimum supported Zig version; keep in sync with build.zig.zon and live.yml.
+  ZIG_VERSION: "0.16.0"
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }}, ${{ matrix.optimize }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        optimize: [Debug, ReleaseSafe]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      # The integration tests talk to a loopback server; a hang must fail fast, not stall the job.
+      - name: Test
+        run: zig build test -Doptimize=${{ matrix.optimize }} --test-timeout 60s --summary all
+
+  checks:
+    name: Format, examples and docs
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Check formatting
+        run: zig build fmt
+
+      - name: Build examples
+        run: zig build examples --summary all
+
+      - name: Build API reference
+        run: zig build docs
+
+      - name: Cross-compile examples
+        run: |
+          for target in x86_64-windows-gnu aarch64-macos x86_64-macos aarch64-linux-musl riscv64-linux-musl; do
+            echo "::group::$target"
+            zig build examples -Dtarget="$target" -Doptimize=ReleaseSafe
+            echo "::endgroup::"
+          done
