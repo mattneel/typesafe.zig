@@ -553,8 +553,9 @@ without a mocking library; the README shows the same twelve lines.
 `build.zig` defines the steps: the `typesafe` module, `test` (offline unit and integration tests),
 `test-live` (the live file, which skips without `TYPESAFE_API_KEY`), `examples` (builds every
 program under `examples/` so the README code cannot rot), `run` (runs one, `-Dexample=<name>`),
-`docs` (autodoc from `getEmittedDocs`, installed to `zig-out/docs`), `fmt`, and `ci`, which runs
-format, tests, examples and docs in one command.
+`docs` (autodoc from `getEmittedDocs`, installed to `zig-out/docs`), `check` (compiles the package
+for the selected target, so `-Dtarget=<triple>` answers "does this build there?" without running
+anything), `fmt`, and `ci`, which runs format, tests, examples and docs in one command.
 
 `build.zig.zon`:
 

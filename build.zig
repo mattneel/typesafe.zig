@@ -113,6 +113,13 @@ pub fn build(b: *std.Build) void {
         .name = "typesafe",
         .root_module = typesafe,
     });
+
+    // Compiles the package for the selected target without running anything, so
+    // `-Dtarget=<triple>` answers "does this build there?" for a target the
+    // toolchain cannot run tests on. It shares the object the docs step uses,
+    // so asking for both costs one compilation.
+    const check_step = b.step("check", "Compile the package for the selected target");
+    check_step.dependOn(&docs_object.step);
     const install_docs = b.addInstallDirectory(.{
         .source_dir = docs_object.getEmittedDocs(),
         .install_dir = .prefix,

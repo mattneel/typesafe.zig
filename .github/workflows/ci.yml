@@ -60,10 +60,16 @@ jobs:
       - name: Build API reference
         run: zig build docs
 
-      - name: Cross-compile examples
+      # The matrix runs the tests wherever the toolchain can run them, which
+      # covers Windows and macOS there. This covers the targets it cannot
+      # (musl, RISC-V) and builds them in a release mode. It compiles the
+      # package, not the examples: the executables are built above, and five
+      # of them per target is twenty-five compilations for the one property
+      # that matters here.
+      - name: Cross-compile the package
         run: |
           for target in x86_64-windows-gnu aarch64-macos x86_64-macos aarch64-linux-musl riscv64-linux-musl; do
             echo "::group::$target"
-            zig build examples -Dtarget="$target" -Doptimize=ReleaseSafe
+            zig build check -Dtarget="$target" -Doptimize=ReleaseSafe
             echo "::endgroup::"
           done
