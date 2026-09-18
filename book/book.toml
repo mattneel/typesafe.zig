@@ -17,6 +17,9 @@ src = "."
 site-url = "/typesafe.zig/"
 default-theme = "ayu"
 no-section-label = true
+# mdBook's highlight.js has no Zig grammar; this one registers into it. The path
+# is relative to the staged book root, which is why build.sh copies the file in.
+additional-js = ["zig-highlight.js"]
 
 [output.html.playground]
 editable = false

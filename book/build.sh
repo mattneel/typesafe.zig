@@ -14,7 +14,7 @@ site="$root/zig-out/site"
 
 rm -rf "$stage" "$site"
 mkdir -p "$stage/docs/guides"
-cp "$root/book/book.toml" "$root/book/SUMMARY.md" "$stage/"
+cp "$root/book/book.toml" "$root/book/SUMMARY.md" "$root/book/zig-highlight.js" "$stage/"
 cp "$root/README.md" "$root/CHANGELOG.md" "$root/RELEASING.md" "$stage/"
 cp "$root/docs/SPEC.md" "$stage/docs/"
 cp "$root/docs/guides/"*.md "$stage/docs/guides/"
