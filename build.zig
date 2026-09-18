@@ -20,10 +20,20 @@ pub fn build(b: *std.Build) void {
     // The hourly refresh of the clock and system root certificates reads
     // `std.http.Client` fields that std does not promise to keep. Consumers
     // that would rather track std themselves can turn it off.
+    //
+    // It is declared twice because Zig looks a `b.dependency` argument up by
+    // the struct field's name and a command-line flag up by the name given
+    // here: `-Dtls-trust-refresh=false` on the command line, or
+    // `.tls_trust_refresh = false` through `b.dependency`. A single name would
+    // make the other spelling fail with "invalid option".
     const tls_trust_refresh = b.option(
         bool,
         "tls-trust-refresh",
         "Reload the system root certificates and the clock hourly (default: true)",
+    ) orelse b.option(
+        bool,
+        "tls_trust_refresh",
+        "Alias of tls-trust-refresh, for `b.dependency(..., .{ .tls_trust_refresh = false })`",
     ) orelse true;
     build_options.addOption(bool, "tls_trust_refresh", tls_trust_refresh);
 

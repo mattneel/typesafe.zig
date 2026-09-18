@@ -90,9 +90,10 @@ requires Zig 0.16.0 or later and uses only the standard library.
 - `typesafe.testing.MockServer`, a loopback HTTP server with scripted replies (answers, API
   errors, delays, dropped connections, unread request bodies, truncated bodies, connections
   closed after a reply) and recorded requests, for testing code that uses the client.
-- Examples (`route_ticket`, `structured`, `batch`, `dynamic`, `list_models`), guides (questions,
-  confidence, concurrency, testing, observability) and an API reference generated with
-  `zig build docs`.
+- Examples (`route_ticket`, `structured`, `batch`, `dynamic`, `list_models`), guides
+  (installation, questions, confidence, concurrency, testing, observability) and an API reference
+  generated with `zig build docs`. The guides, this changelog, the release checklist and the
+  README are published as one site by `book/build.sh` and the Docs workflow.
 
 [Unreleased]: https://github.com/mattneel/typesafe.zig/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/mattneel/typesafe.zig/releases/tag/v0.1.0

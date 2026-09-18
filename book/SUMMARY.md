@@ -4,6 +4,7 @@
 
 # Guides
 
+- [Installation](docs/guides/installation.md)
 - [Questions](docs/guides/questions.md)
 - [Confidence and thresholds](docs/guides/confidence.md)
 - [Concurrency](docs/guides/concurrency.md)

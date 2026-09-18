@@ -82,6 +82,10 @@ exe.root_module.addImport("typesafe", typesafe.module("typesafe"));
 Get an API key from the [TypeSafe quick start](https://docs.typesafe.ai/introduction/quickstart)
 and export it as `TYPESAFE_API_KEY`.
 
+The [installation guide](docs/guides/installation.md) takes it from there: wiring the module into
+libraries and test steps as well as executables, where the key belongs, a program you can run, the
+build options, and what the errors mean.
+
 ## Questions
 
 A question is a small, focused judgment about the state you send. Build questions with the three
@@ -483,6 +487,7 @@ as a pure function of the answers struct needs no server at all. See the
 
 ## Guides and examples
 
+- [Installation](docs/guides/installation.md): fetching the package and wiring it into a build
 - [Questions](docs/guides/questions.md): the three primitives, structure, ids, validation
 - [Confidence](docs/guides/confidence.md): probabilities, confidence and thresholds in your code
 - [Concurrency](docs/guides/concurrency.md): many questions per request, many requests at once

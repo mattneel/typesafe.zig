@@ -586,8 +586,8 @@ Quality gates, in `.github/workflows/ci.yml` on every push and PR, matrix `ubunt
 Documentation: doc comments on the public surface, rendered with `zig build docs`; the README holds
 install, the ticket-routing example, the MockServer pattern, error handling with `Diagnostics`, and
 a link per TypeSafe docs concept (state, questions and structure, confidence and thresholds,
-batching) rather than restating them; `docs/guides/` holds the longer treatments (questions,
-confidence, concurrency, testing, observability).
+batching) rather than restating them; `docs/guides/` holds the longer treatments (installation,
+questions, confidence, concurrency, testing, observability).
 
 Those pages are published as one site by `.github/workflows/pages.yml` on every push to `master`
 that touches them: `book/build.sh` stages the README, the guides, this file, the changelog and the
