@@ -22,9 +22,16 @@ the entry with the key the package's own manifest asks for:
 },
 ```
 
-Pin a tag, as above, for a released version. Pin a commit instead
-(`#<commit-sha>`) to follow `master` between releases. The hash is of the package contents, not of
-the URL, so a tag that moved would be caught by the build rather than silently accepted.
+Pin a tag, as above, for a released version. Pin a commit instead to follow `master` between
+releases, using the **full forty-character** SHA — git will not resolve a short one, and
+`zig fetch` reports `ref not found`:
+
+```console
+$ zig fetch --save git+https://github.com/mattneel/typesafe.zig#3edd6c5d0889921d25017310308347e68930699e
+```
+
+The hash is of the package contents, not of the URL, so a tag that moved would be caught by the
+build rather than silently accepted.
 
 The first `zig fetch` puts the package in Zig's global cache. Later builds reuse it, so `zig build`
 does not need the network again, and nothing is copied into your repository.
