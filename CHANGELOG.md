@@ -8,7 +8,7 @@ any change to an answer type or the wire format is at least a minor version bump
 
 ## [Unreleased]
 
-## [0.1.0] - Unreleased
+## [0.1.0] - 2026-09-18
 
 First release: an unofficial community Zig client for TypeSafe's System One API (the Jev model).
 It is not an official TypeSafe SDK and is not affiliated with or endorsed by TypeSafe.
