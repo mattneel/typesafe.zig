@@ -34,9 +34,17 @@ jobs:
         run: |
           if [ -n "$TYPESAFE_API_KEY" ]; then
             echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "The secret is set; the live tests run below." >> "$GITHUB_STEP_SUMMARY"
           else
             echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "::notice title=Live tests skipped::The TYPESAFE_API_KEY repository secret is not set."
+            echo "::warning title=Live tests skipped::The TYPESAFE_API_KEY repository secret is not set, so nothing here reached the API."
+            {
+              echo "## Live tests skipped"
+              echo
+              echo "The \`TYPESAFE_API_KEY\` repository secret is not set, so no request was made and"
+              echo "this run proves nothing about the API. Add it under Settings → Secrets and"
+              echo "variables → Actions, then re-run this workflow."
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
 
   # The transport is where platforms differ, and the offline suite runs against
