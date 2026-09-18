@@ -1,6 +1,7 @@
 //! Integration tests: the client against a loopback `MockServer`.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 const testing = std.testing;
 
@@ -11,6 +12,7 @@ const hooks = @import("hooks.zig");
 const question = @import("question.zig");
 const dynamic = @import("dynamic.zig");
 const MockServer = @import("testing.zig").MockServer;
+const transport = @import("request.zig");
 
 const Team = enum { billing, technical, sales };
 
@@ -363,7 +365,11 @@ test "an unreachable server fails with ConnectionFailed" {
     var diagnostics: Diagnostics = .init(gpa);
     defer diagnostics.deinit();
     try testing.expectError(error.ConnectionFailed, client.ask(state, questions, .{ .diagnostics = &diagnostics }));
-    try testing.expectEqual(error.ConnectionRefused, diagnostics.cause.?);
+    // The underlying error is std's, and how it spells a refused connection
+    // depends on the platform: Windows reports a bare `error.Unexpected`
+    // (NTSTATUS 0xc0000236, CONNECTION_REFUSED).
+    const refused = if (builtin.os.tag == .windows) error.Unexpected else error.ConnectionRefused;
+    try testing.expectEqual(refused, diagnostics.cause.?);
     try testing.expectEqual(null, diagnostics.status);
     try testing.expectEqual(1, diagnostics.attempts);
 }
@@ -783,4 +789,25 @@ test "diagnostics after a retried error and an undecodable response hold only th
     try testing.expectEqual(std.http.Status.ok, diagnostics.status.?);
     try testing.expectEqualStrings("models", diagnostics.path.?);
     try testing.expectEqual(2, diagnostics.attempts);
+}
+
+test "a failure on a reused connection is classified as a stale connection" {
+    // A server that closed a pooled connection surfaces differently per
+    // platform, so the mapping is checked directly as well as through the
+    // loopback test above.
+    const stale = [_]anyerror{
+        error.HttpConnectionClosing,
+        error.EndOfStream,
+        error.ConnectionResetByPeer,
+        error.BrokenPipe,
+        error.SocketUnconnected,
+        error.NotOpenForReading,
+        error.Unexpected,
+    };
+    for (stale) |err| {
+        try testing.expectEqual(error.StaleConnection, transport.Call.staleOr(true, err));
+        // On a fresh connection the same error is the real outcome.
+        try testing.expectEqual(err, transport.Call.staleOr(false, err));
+    }
+    try testing.expectEqual(error.ConnectionRefused, transport.Call.staleOr(true, error.ConnectionRefused));
 }

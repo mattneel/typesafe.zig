@@ -597,6 +597,11 @@ pub const Call = struct {
             error.BrokenPipe,
             error.SocketUnconnected,
             error.NotOpenForReading,
+            // Windows reports a connection the peer had already closed as a
+            // bare `error.Unexpected` (NTSTATUS 0xc000013b, LOCAL_DISCONNECT).
+            // Only a reused connection is treated this way: on a fresh one the
+            // error is the real outcome and is reported as it is.
+            error.Unexpected,
             => error.StaleConnection,
             else => err,
         };
