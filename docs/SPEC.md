@@ -582,7 +582,9 @@ Quality gates, in `.github/workflows/ci.yml` on every push and PR, matrix `ubunt
 
 `.github/workflows/live.yml` runs the live suite plus every example on a daily schedule and on
 `workflow_dispatch`, gated on `github.repository == 'mattneel/typesafe.zig'` and on the
-`TYPESAFE_API_KEY` secret being set, so forks skip it instead of failing.
+`TYPESAFE_API_KEY` secret being set, so forks skip it instead of failing. It runs on Linux, macOS
+and Windows: the transport is where platforms differ (Windows reports a closed socket as a bare
+`error.Unexpected`, for one), and the offline suite only ever talks to a loopback server.
 
 Documentation: doc comments on the public surface, rendered with `zig build docs`; the README holds
 install, the ticket-routing example, the MockServer pattern, error handling with `Diagnostics`, and

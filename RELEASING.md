@@ -72,8 +72,9 @@ workflow publishes them; `zig build docs` on its own builds only the API referen
 Open a pull request for the release branch and wait for every job to pass: the test matrix on
 Linux, macOS and Windows in Debug and ReleaseSafe, and the format, examples, docs and
 cross-compilation job. Trigger the Live API workflow on the release branch head with
-`workflow_dispatch` and check that the **Live tests** job ran and passed. A run in which it was
-skipped, for example because the `TYPESAFE_API_KEY` secret is not set, does not count.
+`workflow_dispatch` and check that every **Live tests** job ran and passed, on all three
+platforms. A run in which it was skipped, for example because the `TYPESAFE_API_KEY` secret is
+not set, does not count.
 
 Merge the pull request once CI is green.
 

@@ -39,11 +39,19 @@ jobs:
             echo "::notice title=Live tests skipped::The TYPESAFE_API_KEY repository secret is not set."
           fi
 
+  # The transport is where platforms differ, and the offline suite runs against
+  # a loopback server, so the real API is exercised from every platform the
+  # matrix tests: a client that works on Linux says nothing about Windows'
+  # spelling of a closed socket or about either platform's TLS.
   live:
-    name: Live tests
+    name: Live tests (${{ matrix.os }})
     needs: api-key
     if: needs.api-key.outputs.present == 'true'
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
@@ -53,11 +61,13 @@ jobs:
           version: ${{ env.ZIG_VERSION }}
 
       - name: Live tests
+        shell: bash
         env:
           TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
         run: zig build test-live --test-timeout 120s --summary all
 
       - name: Run the examples
+        shell: bash
         env:
           TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
         run: |
