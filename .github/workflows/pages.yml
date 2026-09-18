@@ -1,0 +1,79 @@
+name: Docs
+
+# Publishes the documentation site: the book, plus the API reference generated
+# from the doc comments. `book/build.sh` is the same script a developer runs
+# locally, so what is published is what can be reproduced.
+#
+# The repository's Pages source must be "GitHub Actions" (Settings → Pages).
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "**.md"
+      - "book/**"
+      - "src/**"
+      - "build.zig"
+      - "build.zig.zon"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time, and never cancel one in flight: the site is
+# published atomically, so a cancelled run would leave the previous site up.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  # Keep in sync with build.zig.zon and the other workflows.
+  ZIG_VERSION: "0.16.0"
+  MDBOOK_VERSION: "0.5.2"
+
+jobs:
+  build:
+    name: Build the site
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      # Downloaded rather than taken from a third-party action, so the only
+      # thing trusted here is the release itself.
+      - name: Install mdBook
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -sSfL \
+            "https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          mdbook --version
+
+      - name: Build the book and the API reference
+        run: book/build.sh
+
+      - uses: actions/configure-pages@v6
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: zig-out/site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5

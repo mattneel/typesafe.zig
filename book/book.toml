@@ -1,0 +1,22 @@
+# The book is assembled from the files the repository already keeps, so every
+# chapter has one source of truth: README.md is the introduction, docs/guides
+# are the guides, docs/SPEC.md is the design reference, and the changelog and
+# release checklist close it.
+#
+# `book/build.sh` stages those files and runs mdBook on the copy. mdBook copies
+# every file under `src`, so building in place would copy the whole repository —
+# including .git and .zig-cache — into the site.
+[book]
+title = "typesafe.zig"
+description = "A Zig 0.16 client for TypeSafe's System One API"
+authors = ["Matt Neel"]
+language = "en"
+src = "."
+
+[output.html]
+site-url = "/typesafe.zig/"
+default-theme = "ayu"
+no-section-label = true
+
+[output.html.playground]
+editable = false

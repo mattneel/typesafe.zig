@@ -51,13 +51,19 @@ the API reference.
 ## 3. Review the docs locally
 
 ```console
-$ zig build docs
-$ python3 -m http.server -d zig-out/docs
+$ book/build.sh
+$ python3 -m http.server -d zig-out/site
 ```
+
+`book/build.sh` builds the book and the API reference into `zig-out/site`, exactly as the Docs
+workflow publishes them; `zig build docs` on its own builds only the API reference.
 
 - [ ] Every public declaration has a doc comment, and `.version` in `build.zig.zon`, which
       `typesafe.version` reads, is X.Y.Z. (The generated reference does not print the version;
       check the manifest.)
+- [ ] The Docs workflow ran on `master` and the site at
+      <https://mattneel.github.io/typesafe.zig/> shows the new version, with the guides, the
+      design notes and the API reference under `/api/`.
 - [ ] README links to `docs/guides/*.md`, `CHANGELOG.md` and the examples work from the release
       branch on GitHub.
 

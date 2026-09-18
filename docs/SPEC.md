@@ -175,8 +175,9 @@ typesafe.zig/
 ├── tests/live.zig          smoke tests against api.typesafe.ai, skipped without TYPESAFE_API_KEY
 ├── examples/               route_ticket, structured, batch, dynamic, list_models
 ├── docs/guides/            questions, confidence, concurrency, testing, observability
+├── book/                   book.toml, SUMMARY.md, build.sh: the documentation site
 ├── README.md · CHANGELOG.md · RELEASING.md · LICENSE (MIT)
-└── .github/workflows/ci.yml · live.yml
+└── .github/workflows/ci.yml · live.yml · pages.yml
 ```
 
 The main call, in the form the README opens with:
@@ -587,6 +588,13 @@ install, the ticket-routing example, the MockServer pattern, error handling with
 a link per TypeSafe docs concept (state, questions and structure, confidence and thresholds,
 batching) rather than restating them; `docs/guides/` holds the longer treatments (questions,
 confidence, concurrency, testing, observability).
+
+Those pages are published as one site by `.github/workflows/pages.yml` on every push to `master`
+that touches them: `book/build.sh` stages the README, the guides, this file, the changelog and the
+release checklist as the chapters of an mdBook, builds it, and merges the API reference beside it
+at `/api/`. The chapters are the repository's own files, so nothing is duplicated; they are staged
+because mdBook copies every file under its `src` directory into the output, which would otherwise
+publish `.git` and the build caches with the site.
 
 Versioning and publishing: SemVer with `v0.x` tags; consumers pin with
 `zig fetch --save git+https://github.com/mattneel/typesafe.zig#v0.1.0`, which records the content

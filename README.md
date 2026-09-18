@@ -497,7 +497,10 @@ Examples, each runnable with `zig build run -Dexample=<name>`:
 - `dynamic`: a taxonomy loaded at run time
 - `list_models`: the models available to your account
 
-The API reference is generated from doc comments: `zig build docs`, then serve `zig-out/docs`.
+These pages are published together at <https://mattneel.github.io/typesafe.zig/>, built by
+`book/build.sh`: the guides and the design notes as a book, with the API reference — generated
+from the doc comments — at `/api/`. To read them locally, `zig build docs` serves the API
+reference from `zig-out/docs` on its own.
 
 ## Development
 
@@ -506,7 +509,14 @@ zig build test                      # offline unit and integration tests
 TYPESAFE_API_KEY=... zig build test-live   # live tests against api.typesafe.ai (billable)
 zig build examples docs fmt         # examples, API reference, format check
 zig build ci                        # every offline gate
+
+book/build.sh                       # the documentation site into zig-out/site
+mdbook serve zig-out/book-src       # preview the book while editing (run build.sh once first)
 ```
+
+The book's chapters are this README, the guides, the design notes, the changelog and the release
+checklist, so there is no second copy of anything to keep in step. A push to `master` that
+touches them publishes the site; `book/build.sh` is the whole of that build.
 
 Links: [TypeSafe documentation](https://docs.typesafe.ai) ·
 [HTTP API reference](https://docs.typesafe.ai/api) · [Changelog](CHANGELOG.md) ·
