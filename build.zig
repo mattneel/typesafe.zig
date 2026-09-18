@@ -57,8 +57,25 @@ pub fn build(b: *std.Build) void {
         .filters = test_filters,
     });
     const run_unit_tests = b.addRunArtifact(unit_tests);
+
+    // The README's install snippet and the version the client reports are two
+    // hand-written copies of the same fact, so they are checked against each
+    // other. Its module is rooted at the package root to reach README.md.
+    const release_tests = b.addTest(.{
+        .name = "typesafe-release-test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("release_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "typesafe", .module = typesafe }},
+        }),
+        .filters = test_filters,
+    });
+    const run_release_tests = b.addRunArtifact(release_tests);
+
     const test_step = b.step("test", "Run the offline unit and integration tests");
     test_step.dependOn(&run_unit_tests.step);
+    test_step.dependOn(&run_release_tests.step);
 
     // Live tests against the real API. They need TYPESAFE_API_KEY and make
     // billable requests, so they are a separate step that `test` never runs.
@@ -128,7 +145,7 @@ pub fn build(b: *std.Build) void {
     const docs_step = b.step("docs", "Generate the API reference into zig-out/docs");
     docs_step.dependOn(&install_docs.step);
 
-    const fmt_paths = &.{ "build.zig", "build.zig.zon", "src", "tests", "examples" };
+    const fmt_paths = &.{ "build.zig", "build.zig.zon", "release_test.zig", "src", "tests", "examples" };
     const fmt = b.addFmt(.{ .paths = fmt_paths, .check = true });
     const fmt_step = b.step("fmt", "Check source formatting");
     fmt_step.dependOn(&fmt.step);

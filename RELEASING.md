@@ -24,7 +24,9 @@ change to an answer type or the wire format is at least a minor bump.
 - [ ] If the minimum Zig version changes, update `.minimum_zig_version` in `build.zig.zon`,
       `ZIG_VERSION` in `.github/workflows/ci.yml` and `live.yml`, and the requirement in
       `README.md`.
-- [ ] Update the install snippet to `#vX.Y.Z` in `README.md`.
+- [ ] Update the install snippet to `#vX.Y.Z` in `README.md`. `zig build test` checks it
+      against the version the client reports, so a release that updates one and not the other
+      fails the suite instead of shipping quietly.
 - [ ] In `CHANGELOG.md`, move the entries under `## [Unreleased]` to a new
       `## [X.Y.Z] - YYYY-MM-DD` heading below it, and leave `## [Unreleased]` empty. Use the date
       on which you will merge and tag. Add a `[X.Y.Z]` link at the bottom and point the

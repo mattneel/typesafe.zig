@@ -586,8 +586,14 @@ test "initFromEnv resolves options, then environment, then defaults" {
     }
 }
 
-test "identification strings" {
-    try std.testing.expect(std.mem.startsWith(u8, sdk_identifier, "typesafe-zig/"));
+test "the identity string is built from this package's version" {
+    // The tests that send the identity compare it against `sdk_identifier`
+    // itself, so they agree with any version at all, and Zig rejects a
+    // `.version` in `build.zig.zon` that is not a semantic version. What is
+    // left to pin is that the identity is built from the version rather than
+    // spelled out beside it. That the version is the released one, and the same
+    // one the README tells people to install, is `release_test.zig`'s job.
+    try std.testing.expectEqualStrings("typesafe-zig/" ++ version, sdk_identifier);
     try std.testing.expect(std.mem.startsWith(u8, runtime_identifier, "zig/"));
 }
 
